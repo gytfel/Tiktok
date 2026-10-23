@@ -16,6 +16,7 @@ from . import __version__, config, library, tts
 from .backgrounds import GRADIENT_PRESETS
 from .ffmpeg_utils import capabilities
 from .jobs import JobManager
+from .pipeline import RenderError, check_sources
 from .project import DEFAULT_PROJECT, normalize
 from .subtitles import font_height_ratio
 
@@ -146,6 +147,10 @@ def start_render(project: dict = Body(...)) -> dict:
     caps = capabilities()
     if not caps["found"]:
         raise HTTPException(500, "ffmpeg не найден — см. README, раздел «Установка»")
+    try:
+        check_sources(normalize(project))
+    except RenderError as exc:
+        raise HTTPException(400, str(exc)) from exc
     return manager.submit(project).public()
 
 

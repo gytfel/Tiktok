@@ -603,7 +603,10 @@ async function startRender() {
   const box = $("#jobBox");
   box.hidden = false;
   box.classList.remove("error");
+  $("#jobError").hidden = true;
   $("#jobLog").textContent = "";
+  $("#jobLog").hidden = true;
+  $("#cancelBtn").hidden = false;
   setJobProgress("Отправка…", 0);
   try {
     const job = await api("/api/render", { method: "POST", body: state.project });
@@ -611,10 +614,23 @@ async function startRender() {
     pollJob();
   } catch (e) {
     btn.disabled = false;
-    box.classList.add("error");
     setJobProgress("Ошибка", 0);
-    toast(e.message, "error", 9000);
+    showJobError(e.message);
   }
+}
+function showJobError(message, stage) {
+  const box = $("#jobBox");
+  box.classList.add("error");
+  $("#cancelBtn").hidden = true;
+  const where = stage && stage !== "Ошибка" ? ` на этапе «${esc(stage)}»` : "";
+  let action = "";
+  if (/бесплатный ключ|ключ API|ключ Pexels/i.test(message)) action = `<button class="btn secondary" data-fix="settings">Открыть настройки</button>`;
+  else if (/фон/i.test(message)) action = `<button class="btn secondary" data-fix="bg">Перейти на вкладку «Фон»</button>`;
+  else if (/музык/i.test(message)) action = `<button class="btn secondary" data-fix="music">Перейти на вкладку «Музыка»</button>`;
+  const el = $("#jobError");
+  el.innerHTML = `<b>Видео не создано${where}.</b>\n${esc(message)}${action ? "\n" + action : ""}`;
+  el.hidden = false;
+  toast(message, "error", 9000);
 }
 function setJobProgress(stage, percent) {
   $("#jobStage").textContent = stage;
@@ -638,6 +654,7 @@ async function pollJob() {
     return;
   }
   $("#renderBtn").disabled = false;
+  $("#cancelBtn").hidden = true;
   state.jobId = null;
   if (job.status === "done") {
     const r = job.result;
@@ -649,9 +666,7 @@ async function pollJob() {
     toast(`Видео готово: ${fmtDuration(r.duration)}, собрано за ${r.render_seconds} с`);
     loadVideos();
   } else if (job.status === "error") {
-    $("#jobBox").classList.add("error");
-    $("#jobLog").hidden = false;
-    toast(job.error || "Ошибка рендера", "error", 12000);
+    showJobError(job.error || "Неизвестная ошибка — откройте «Подробности»", job.failed_stage);
   } else {
     toast("Рендер отменён");
   }
@@ -662,6 +677,14 @@ function setupRender() {
     if (state.jobId) await api(`/api/jobs/${state.jobId}/cancel`, { method: "POST" }).catch(() => {});
   });
   $("#toggleLog").addEventListener("click", () => { $("#jobLog").hidden = !$("#jobLog").hidden; });
+  $("#jobError").addEventListener("click", (e) => {
+    const fix = e.target.closest("[data-fix]")?.dataset.fix;
+    if (fix === "settings") openSettings();
+    else if (fix) {
+      openTab(fix);
+      $(".tabs").scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  });
   document.addEventListener("keydown", (e) => {
     if ((e.ctrlKey || e.metaKey) && e.key === "Enter" && !$("#renderBtn").disabled) startRender();
   });
@@ -752,6 +775,11 @@ function setupSettings() {
 
 // ------------------------------------------------------------------ запуск
 
+function openTab(name) {
+  $$(".tab").forEach((x) => x.classList.toggle("active", x.dataset.tab === name));
+  $$(".tab-panel").forEach((p) => p.classList.toggle("active", p.dataset.panel === name));
+}
+
 function showFfmpegStatus() {
   const f = state.status.ffmpeg;
   const pill = $("#ffmpegStatus");
@@ -791,12 +819,7 @@ async function init() {
   setupSettings();
   bindFields();
 
-  $$(".tab").forEach((t) =>
-    t.addEventListener("click", () => {
-      $$(".tab").forEach((x) => x.classList.toggle("active", x === t));
-      $$(".tab-panel").forEach((p) => p.classList.toggle("active", p.dataset.panel === t.dataset.tab));
-    })
-  );
+  $$(".tab").forEach((t) => t.addEventListener("click", () => openTab(t.dataset.tab)));
   $("#voiceLang").addEventListener("change", () => { fillVoiceSelect(false); saveDraft(); });
   $("#previewVoiceBtn").addEventListener("click", previewVoice);
   $("#sampleBtn").addEventListener("click", () => {

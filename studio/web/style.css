@@ -228,6 +228,9 @@ input[type="color"]::-webkit-color-swatch { border: none; border-radius: 5px; }
 .progress { height: 8px; background: #2a2a38; border-radius: 6px; overflow: hidden; margin: 10px 0; }
 .progress div { height: 100%; width: 0; background: var(--accent); transition: width .3s ease; }
 .job.error .progress div { background: #ff4d6a; }
+.job-error { background: rgba(255, 77, 106, .1); border: 1px solid rgba(255, 77, 106, .45); color: #ffc2cd; border-radius: 9px; padding: 10px 12px; margin-bottom: 10px; font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.job-error b { color: #fff; }
+.job-error .btn { margin-top: 10px; padding: 7px 12px; font-size: 13px; }
 .log { max-height: 220px; overflow: auto; font-size: 11px; background: #0c0c12; border-radius: 8px; padding: 8px; white-space: pre-wrap; word-break: break-all; color: #b8b8c8; margin: 10px 0 0; }
 .result { display: flex; gap: 10px; margin-top: 14px; flex-wrap: wrap; }
 .result .btn { flex: 1; }
