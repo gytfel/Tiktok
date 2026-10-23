@@ -127,7 +127,7 @@ def gradient_graph(image: Path, total: float, speed: float = 30.0) -> Background
     g.input_count = 1
     g.filters.append(
         f"[0:v]format=rgb24,{_still(total)},crop={W}:{H}:0:'mod(t*{speed:.1f},{H})',"
-        f"format=yuv420p,setsar=1[bg]"
+        f"fps={FPS},format=yuv420p,setsar=1[bg]"
     )
     g.output = "bg"
     return g
@@ -283,7 +283,8 @@ def media_graph(segments: list[Segment], fit: str = "cover", motion: bool = True
             g.filters += _fit_chain(f"{i}:v", f"fit{uid}", fit, W, H, uid)
             src = f"fit{uid}"
         g.filters.append(
-            f"[{src}]fps={FPS},format=yuv420p,setsar=1,trim=duration={length:.3f},setpts=PTS-STARTPTS[s{uid}]"
+            # fps — после setpts: в ffmpeg 7 setpts сбрасывает частоту кадров, а xfade без неё не работает.
+            f"[{src}]trim=duration={length:.3f},setpts=PTS-STARTPTS,fps={FPS},format=yuv420p,setsar=1[s{uid}]"
         )
         labels.append(f"s{uid}")
     g.input_count = n
