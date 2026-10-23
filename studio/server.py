@@ -9,7 +9,7 @@ import tempfile
 from pathlib import Path
 
 from fastapi import Body, FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import __version__, ai, config, library, tts
@@ -33,8 +33,13 @@ app.mount("/files/outputs", StaticFiles(directory=config.OUTPUTS_DIR), name="out
 
 
 @app.get("/", include_in_schema=False)
-def index() -> FileResponse:
-    return FileResponse(config.WEB_DIR / "index.html", headers={"Cache-Control": "no-cache"})
+def index() -> HTMLResponse:
+    # Метка версии у app.js и style.css: после обновления студии браузер не возьмёт старые файлы из кэша.
+    html = (config.WEB_DIR / "index.html").read_text(encoding="utf-8")
+    for name in ("app.js", "style.css"):
+        digest = hashlib.sha1((config.WEB_DIR / name).read_bytes()).hexdigest()[:10]
+        html = html.replace(f'/static/{name}"', f'/static/{name}?v={digest}"')
+    return HTMLResponse(html, headers={"Cache-Control": "no-cache"})
 
 
 # ------------------------------------------------------------- общее
