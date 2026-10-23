@@ -1,0 +1,394 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TikTok Studio</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23111'/%3E%3Cpath d='M18 7v12.5a3.5 3.5 0 1 1-3.5-3.5' stroke='%2325F4EE' stroke-width='3' fill='none' stroke-linecap='round' transform='translate(-1 1)'/%3E%3Cpath d='M18 7v12.5a3.5 3.5 0 1 1-3.5-3.5M18 7c.5 3 2.5 5 5.5 5' stroke='%23FE2C55' stroke-width='3' fill='none' stroke-linecap='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="logo" aria-hidden="true">
+      <svg viewBox="0 0 32 32"><path d="M18 7v12.5a3.5 3.5 0 1 1-3.5-3.5" class="l1"/><path d="M18 7v12.5a3.5 3.5 0 1 1-3.5-3.5M18 7c.5 3 2.5 5 5.5 5" class="l2"/></svg>
+    </span>
+    <span class="brand-name">TikTok Studio</span>
+  </div>
+  <div class="top-actions">
+    <span id="ffmpegStatus" class="pill">проверка…</span>
+    <button class="icon-btn" id="settingsBtn" title="Настройки">
+      <svg viewBox="0 0 24 24"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z"/></svg>
+    </button>
+  </div>
+</header>
+
+<main class="layout">
+  <section class="editor">
+    <!-- Текст -->
+    <div class="card">
+      <div class="card-head">
+        <h2>Текст ролика</h2>
+        <button class="link-btn" id="sampleBtn">Вставить пример</button>
+      </div>
+      <label class="field">
+        <span>Заголовок-хук сверху <em>(необязательно)</em></span>
+        <input type="text" data-bind="title.text" maxlength="200" placeholder="Например: 3 факта, о которых молчат">
+      </label>
+      <textarea id="text" data-bind="text" rows="10" placeholder="Напишите или вставьте текст. Его прочитает голос, а внизу появятся субтитры.&#10;&#10;Пустая строка между абзацами — новая сцена."></textarea>
+      <div class="text-meta">
+        <span id="textStats">0 слов · ~0 сек</span>
+        <span class="hint">Эмодзи не озвучиваются и в субтитры не попадают</span>
+      </div>
+    </div>
+
+    <!-- Настройки -->
+    <div class="card">
+      <nav class="tabs" role="tablist">
+        <button class="tab active" data-tab="voice">Голос</button>
+        <button class="tab" data-tab="subs">Субтитры</button>
+        <button class="tab" data-tab="bg">Фон</button>
+        <button class="tab" data-tab="music">Музыка</button>
+        <button class="tab" data-tab="export">Экспорт</button>
+      </nav>
+
+      <!-- Голос -->
+      <div class="tab-panel active" data-panel="voice">
+        <div class="row">
+          <label class="field">
+            <span>Язык</span>
+            <select id="voiceLang">
+              <option value="ru">Русские</option>
+              <option value="multi">Мультиязычные (читают и по-русски)</option>
+              <option value="uk">Украинские</option>
+              <option value="kk">Казахские</option>
+              <option value="en">Английские</option>
+              <option value="system">Системные (без интернета)</option>
+              <option value="all">Все голоса</option>
+            </select>
+          </label>
+          <label class="field grow">
+            <span>Голос</span>
+            <select id="voiceSelect" data-bind="voice.voice"></select>
+          </label>
+        </div>
+        <div class="row">
+          <label class="field grow">
+            <span>Скорость речи <output data-out="voice.rate" data-suffix="%" data-sign></output></span>
+            <input type="range" min="-50" max="60" step="1" data-bind="voice.rate">
+          </label>
+          <label class="field grow">
+            <span>Тон голоса <output data-out="voice.pitch" data-suffix=" Гц" data-sign></output></span>
+            <input type="range" min="-30" max="30" step="1" data-bind="voice.pitch">
+          </label>
+        </div>
+        <div class="row">
+          <button class="btn secondary" id="previewVoiceBtn">
+            <svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+            Прослушать голос
+          </button>
+          <span class="hint" id="voiceHint"></span>
+        </div>
+        <audio id="voiceAudio" hidden></audio>
+      </div>
+
+      <!-- Субтитры -->
+      <div class="tab-panel" data-panel="subs">
+        <label class="switch">
+          <input type="checkbox" data-bind="subtitles.enabled">
+          <span>Показывать субтитры</span>
+        </label>
+        <div class="presets" id="subPresets"></div>
+        <div class="row">
+          <label class="field grow">
+            <span>Шрифт</span>
+            <select data-bind="subtitles.font" id="fontSelect"></select>
+          </label>
+          <label class="field">
+            <span>Стиль</span>
+            <select data-bind="subtitles.style">
+              <option value="outline">Обводка</option>
+              <option value="box">Плашка</option>
+            </select>
+          </label>
+        </div>
+        <div class="row">
+          <label class="field grow">
+            <span>Размер <output data-out="subtitles.size"></output></span>
+            <input type="range" min="50" max="150" data-bind="subtitles.size">
+          </label>
+          <label class="field grow">
+            <span>Слов во фразе <output data-out="subtitles.words_per_chunk"></output></span>
+            <input type="range" min="1" max="6" data-bind="subtitles.words_per_chunk">
+          </label>
+        </div>
+        <div class="row">
+          <label class="field grow">
+            <span>Положение по высоте <output data-out="subtitles.position" data-suffix="%"></output></span>
+            <input type="range" min="15" max="85" data-bind="subtitles.position">
+          </label>
+          <label class="field grow">
+            <span>Толщина обводки <output data-out="subtitles.outline"></output></span>
+            <input type="range" min="0" max="14" step="0.5" data-bind="subtitles.outline">
+          </label>
+        </div>
+        <div class="row colors">
+          <label class="color-field"><input type="color" data-bind="subtitles.color"><span>Текст</span></label>
+          <label class="color-field"><input type="color" data-bind="subtitles.highlight"><span>Активное слово</span></label>
+          <label class="color-field"><input type="color" data-bind="subtitles.outline_color"><span>Обводка</span></label>
+          <label class="color-field"><input type="color" data-bind="subtitles.box_color"><span>Плашка</span></label>
+        </div>
+        <div class="row">
+          <label class="field grow">
+            <span>Подсветка слова</span>
+            <select data-bind="subtitles.highlight_mode">
+              <option value="color">Цветом</option>
+              <option value="scale">Цветом и увеличением</option>
+              <option value="none">Без подсветки</option>
+            </select>
+          </label>
+          <label class="field grow">
+            <span>Прозрачность плашки <output data-out="subtitles.box_opacity" data-percent></output></span>
+            <input type="range" min="0" max="1" step="0.05" data-bind="subtitles.box_opacity">
+          </label>
+        </div>
+        <div class="row">
+          <label class="switch"><input type="checkbox" data-bind="subtitles.uppercase"><span>ЗАГЛАВНЫМИ БУКВАМИ</span></label>
+          <label class="switch"><input type="checkbox" data-bind="subtitles.animation" data-true="pop" data-false="none"><span>Анимация появления</span></label>
+        </div>
+
+        <h3 class="sub-head">Заголовок сверху</h3>
+        <div class="row">
+          <label class="field grow">
+            <span>Показывать <output data-out="title.duration" data-zero="весь ролик" data-suffix=" сек"></output></span>
+            <input type="range" min="0" max="15" step="0.5" data-bind="title.duration">
+          </label>
+          <label class="field grow">
+            <span>Размер <output data-out="title.size"></output></span>
+            <input type="range" min="40" max="110" data-bind="title.size">
+          </label>
+        </div>
+        <div class="row">
+          <label class="field grow">
+            <span>Положение <output data-out="title.position" data-suffix="%"></output></span>
+            <input type="range" min="8" max="40" data-bind="title.position">
+          </label>
+          <div class="row colors">
+            <label class="color-field"><input type="color" data-bind="title.color"><span>Текст</span></label>
+            <label class="color-field"><input type="color" data-bind="title.box_color"><span>Плашка</span></label>
+          </div>
+        </div>
+      </div>
+
+      <!-- Фон -->
+      <div class="tab-panel" data-panel="bg">
+        <div class="segmented" id="bgType">
+          <button data-value="gradient">Градиент</button>
+          <button data-value="media">Мои фото и видео</button>
+          <button data-value="pexels">Стоки Pexels</button>
+        </div>
+
+        <div class="bg-section" data-bg="gradient">
+          <div class="swatches" id="gradientSwatches"></div>
+          <div class="row colors">
+            <label class="color-field"><input type="color" data-grad="0"><span>Цвет 1</span></label>
+            <label class="color-field"><input type="color" data-grad="1"><span>Цвет 2</span></label>
+            <label class="color-field"><input type="color" data-grad="2"><span>Цвет 3</span></label>
+          </div>
+          <label class="field">
+            <span>Скорость движения <output data-out="background.gradient_speed"></output></span>
+            <input type="range" min="0" max="120" data-bind="background.gradient_speed">
+          </label>
+        </div>
+
+        <div class="bg-section" data-bg="media">
+          <div class="dropzone" id="dropzone">
+            <input type="file" id="fileInput" multiple accept="image/*,video/*,audio/*" hidden>
+            <svg viewBox="0 0 24 24"><path d="M12 16V4m0 0L7 9m5-5 5 5M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+            <div><strong>Перетащите файлы сюда</strong> или <button class="link-btn" id="pickFiles">выберите на компьютере</button></div>
+            <div class="hint">JPG, PNG, WEBP, MP4, MOV, WEBM. Можно сразу несколько.</div>
+            <div class="upload-progress" id="uploadProgress" hidden><div></div></div>
+          </div>
+          <div class="media-head">
+            <h3 class="sub-head">В ролике <span class="hint">— по порядку, нажмите на файл в библиотеке, чтобы добавить</span></h3>
+          </div>
+          <div class="sequence" id="sequence"></div>
+          <h3 class="sub-head">Библиотека</h3>
+          <div class="library" id="mediaLibrary"></div>
+        </div>
+
+        <div class="bg-section" data-bg="pexels">
+          <p class="hint">Бесплатные вертикальные видео с <a href="https://www.pexels.com/api/" target="_blank" rel="noopener">Pexels</a>. Нужен бесплатный ключ API — укажите его в <button class="link-btn" data-open-settings>настройках</button>.</p>
+          <label class="field">
+            <span>Ключевые слова через запятую — по одному клипу на каждое</span>
+            <input type="text" data-bind="background.pexels_query" placeholder="ночной город, океан, космос, кофе">
+          </label>
+          <div class="hint" id="pexelsKeyState"></div>
+        </div>
+
+        <div class="bg-common" id="bgCommon">
+          <div class="row">
+            <label class="field grow">
+              <span>Вписывание</span>
+              <select data-bind="background.fit">
+                <option value="cover">Заполнить кадр (обрезать края)</option>
+                <option value="blur">Целиком на размытом фоне</option>
+              </select>
+            </label>
+            <label class="field grow">
+              <span>Смена кадров</span>
+              <select data-bind="background.switch">
+                <option value="auto">Равномерно, по предложениям</option>
+                <option value="paragraphs">По абзацам текста</option>
+              </select>
+            </label>
+          </div>
+          <div class="row">
+            <label class="field grow">
+              <span>Длина сцены до <output data-out="background.max_segment" data-zero="без нарезки" data-suffix=" сек"></output></span>
+              <input type="range" min="0" max="20" step="0.5" data-bind="background.max_segment">
+            </label>
+            <label class="field grow">
+              <span>Переход <output data-out="background.transition" data-zero="резкий" data-suffix=" сек"></output></span>
+              <input type="range" min="0" max="1" step="0.05" data-bind="background.transition">
+            </label>
+          </div>
+          <label class="switch"><input type="checkbox" data-bind="background.motion"><span>Плавное движение камеры на фото</span></label>
+        </div>
+
+        <label class="field">
+          <span>Затемнение фона <output data-out="background.dim" data-percent></output></span>
+          <input type="range" min="0" max="0.8" step="0.05" data-bind="background.dim">
+        </label>
+      </div>
+
+      <!-- Музыка -->
+      <div class="tab-panel" data-panel="music">
+        <p class="hint">Фоновая музыка зациклится на всю длину ролика и плавно затихнет в конце. Используйте треки, на которые у вас есть права.</p>
+        <div class="row">
+          <label class="field grow">
+            <span>Трек</span>
+            <select id="musicSelect" data-bind="music.file"></select>
+          </label>
+          <button class="btn secondary" id="uploadMusicBtn">Загрузить трек</button>
+          <input type="file" id="musicInput" accept="audio/*" hidden>
+        </div>
+        <label class="field">
+          <span>Громкость музыки <output data-out="music.volume" data-percent></output></span>
+          <input type="range" min="0" max="0.6" step="0.01" data-bind="music.volume">
+        </label>
+        <audio id="musicAudio" controls hidden></audio>
+      </div>
+
+      <!-- Экспорт -->
+      <div class="tab-panel" data-panel="export">
+        <div class="row">
+          <label class="field grow">
+            <span>Качество</span>
+            <select data-bind="export.quality">
+              <option value="fast">Быстро (черновик)</option>
+              <option value="balanced">Оптимально</option>
+              <option value="high">Максимальное (дольше)</option>
+            </select>
+          </label>
+          <label class="field grow">
+            <span>Имя файла</span>
+            <input type="text" data-bind="export.name" placeholder="по заголовку или началу текста">
+          </label>
+        </div>
+        <p class="hint">Видео: MP4 (H.264 + AAC), 1080×1920, 30 кадров/с — рекомендуемый формат TikTok. Громкость голоса нормализуется до −14 LUFS. Рядом с видео сохраняется файл субтитров .srt.</p>
+        <button class="btn ghost" id="resetBtn">Сбросить все настройки</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- Превью и рендер -->
+  <aside class="side">
+    <div class="card preview-card">
+      <div class="card-head">
+        <h2>Превью</h2>
+        <label class="switch small"><input type="checkbox" id="safeZone"><span>Зоны интерфейса TikTok</span></label>
+      </div>
+      <div class="phone">
+        <div class="screen" id="screen">
+          <div class="screen-bg" id="screenBg"></div>
+          <video class="screen-video" id="resultVideo" playsinline controls hidden></video>
+          <div class="screen-dim" id="screenDim"></div>
+          <div class="screen-title" id="screenTitle"></div>
+          <div class="screen-caption" id="screenCaption"></div>
+          <div class="safe-zone" id="safeOverlay" hidden>
+            <div class="sz-right"></div>
+            <div class="sz-bottom"></div>
+            <div class="sz-top"></div>
+          </div>
+        </div>
+      </div>
+      <div class="preview-switch" id="previewSwitch" hidden>
+        <button class="link-btn" id="backToPreview">← вернуться к макету</button>
+      </div>
+
+      <button class="btn primary big" id="renderBtn">
+        <svg viewBox="0 0 24 24"><path d="M4 6h11a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2Zm13 4 5-3v10l-5-3"/></svg>
+        Создать видео
+      </button>
+
+      <div class="job" id="jobBox" hidden>
+        <div class="job-row">
+          <span id="jobStage">…</span>
+          <span id="jobPercent">0%</span>
+        </div>
+        <div class="progress"><div id="jobBar"></div></div>
+        <div class="job-row">
+          <button class="link-btn" id="toggleLog">Подробности</button>
+          <button class="link-btn danger" id="cancelBtn">Отменить</button>
+        </div>
+        <pre class="log" id="jobLog" hidden></pre>
+      </div>
+
+      <div class="result" id="resultBox" hidden>
+        <a class="btn primary" id="downloadBtn" href="#">
+          <svg viewBox="0 0 24 24"><path d="M12 4v12m0 0-5-5m5 5 5-5M4 20h16"/></svg>
+          Скачать MP4
+        </a>
+        <a class="btn secondary" id="srtBtn" href="#" download>Субтитры .srt</a>
+      </div>
+    </div>
+  </aside>
+
+  <section class="gallery card">
+    <div class="card-head">
+      <h2>Мои видео</h2>
+      <span class="hint" id="galleryCount"></span>
+    </div>
+    <div class="gallery-grid" id="gallery"></div>
+  </section>
+</main>
+
+<!-- Настройки -->
+<dialog id="settingsDialog">
+  <form method="dialog" class="dialog-body" id="settingsForm">
+    <h2>Настройки</h2>
+    <label class="field">
+      <span>Ключ Pexels API <em id="pexelsHint"></em></span>
+      <input type="password" name="pexels_api_key" autocomplete="off" placeholder="вставьте ключ, чтобы изменить">
+      <small class="hint">Бесплатно на <a href="https://www.pexels.com/api/" target="_blank" rel="noopener">pexels.com/api</a>. Нужен только для фона «Стоки Pexels».</small>
+    </label>
+    <label class="field">
+      <span>Прокси для озвучки и Pexels <em>(необязательно)</em></span>
+      <input type="text" name="proxy" placeholder="http://127.0.0.1:8080">
+      <small class="hint">Пригодится, если сервис озвучки Microsoft недоступен из вашей сети.</small>
+    </label>
+    <div class="dialog-actions">
+      <button type="button" class="btn ghost" id="clearPexels">Удалить ключ</button>
+      <span class="grow"></span>
+      <button value="cancel" class="btn secondary">Закрыть</button>
+      <button type="button" class="btn primary" id="saveSettings">Сохранить</button>
+    </div>
+  </form>
+</dialog>
+
+<div class="toasts" id="toasts"></div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

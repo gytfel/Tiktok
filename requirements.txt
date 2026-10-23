@@ -1,0 +1,12 @@
+# Веб-интерфейс
+fastapi>=0.110
+uvicorn>=0.27
+python-multipart>=0.0.9
+# Озвучка нейроголосами Microsoft Edge (бесплатно, без ключа)
+edge-tts>=7.0
+# Градиенты и измерение текста
+pillow>=10.0
+# ffmpeg на случай, если он не установлен в системе
+imageio-ffmpeg>=0.5
+# Офлайн-голоса Windows (SAPI) — запасной вариант без интернета
+pyttsx3>=2.90; sys_platform == "win32"
