@@ -15,22 +15,6 @@ if not defined PY (
   exit /b 1
 )
 
-if not exist ".venv\Scripts\python.exe" (
-  echo Первый запуск: создаю окружение и устанавливаю зависимости. Это займёт пару минут...
-  %PY% -m venv .venv
-  if errorlevel 1 (
-    echo Не удалось создать виртуальное окружение.
-    pause
-    exit /b 1
-  )
-)
-
-".venv\Scripts\python.exe" -m pip install -q --disable-pip-version-check -r requirements.txt
-if errorlevel 1 (
-  echo Не удалось установить зависимости. Проверьте подключение к интернету.
-  pause
-  exit /b 1
-)
-
-".venv\Scripts\python.exe" run.py %*
+rem Окружение, зависимости и запуск готовит launcher.py.
+%PY% launcher.py %*
 pause
