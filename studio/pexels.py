@@ -12,21 +12,13 @@ from pathlib import Path
 from typing import Callable
 
 from . import config
+from .net import USER_AGENT, opener
 
 API_URL = "https://api.pexels.com/videos/search"
-USER_AGENT = "TikTokStudio/1.0"
 
 
 class PexelsError(RuntimeError):
     pass
-
-
-def _opener() -> urllib.request.OpenerDirector:
-    proxy = config.get_proxy()
-    handlers = []
-    if proxy:
-        handlers.append(urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
-    return urllib.request.build_opener(*handlers)
 
 
 def search_videos(query: str, api_key: str, per_page: int = 15) -> list[dict]:
@@ -35,7 +27,7 @@ def search_videos(query: str, api_key: str, per_page: int = 15) -> list[dict]:
     )
     req = urllib.request.Request(f"{API_URL}?{params}", headers={"Authorization": api_key, "User-Agent": USER_AGENT})
     try:
-        with _opener().open(req, timeout=30) as resp:
+        with opener().open(req, timeout=30) as resp:
             data = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         if exc.code in (401, 403):
@@ -91,7 +83,7 @@ def fetch_clips(
             tmp = target.with_suffix(".part")
             req = urllib.request.Request(f["link"], headers={"User-Agent": USER_AGENT})
             try:
-                with _opener().open(req, timeout=120) as resp, open(tmp, "wb") as out:
+                with opener().open(req, timeout=120) as resp, open(tmp, "wb") as out:
                     shutil.copyfileobj(resp, out)
             except OSError as exc:
                 tmp.unlink(missing_ok=True)

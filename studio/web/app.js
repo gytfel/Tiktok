@@ -15,6 +15,7 @@ const state = {
   jobId: null,
   pollTimer: null,
   previewWord: 0,
+  aiBusy: {}, // номер сцены -> текст состояния, пока идёт генерация
 };
 
 const SAMPLE_TEXT = `Знаете, почему осьминогов считают одними из самых умных существ на планете?
@@ -150,6 +151,7 @@ function syncForm() {
   markGradientSwatch();
   fillVoiceSelect(true);
   renderMedia();
+  renderScenes();
   renderMusicSelect();
   updateOutputs();
   updateStats();
@@ -168,6 +170,7 @@ function updateOutputs() {
 function onChange(path) {
   updateOutputs();
   if (path === "text" || path === "voice.rate") updateStats();
+  if (path === "text") renderScenes();
   if (path.startsWith("music")) updateMusicPlayer();
   renderPreview();
   saveDraft();
@@ -342,6 +345,8 @@ function showBgSection() {
   const type = state.project.background.type;
   $$(".bg-section").forEach((s) => s.classList.toggle("active", s.dataset.bg === type));
   $("#bgCommon").hidden = type === "gradient";
+  $$(".not-ai").forEach((el) => { el.hidden = type === "ai"; });
+  renderAiStatus();
   const st = state.status?.settings;
   $("#pexelsKeyState").textContent = st?.pexels_api_key_set ? `Ключ сохранён (${st.pexels_api_key_hint})` : "Ключ ещё не указан.";
 }
@@ -461,8 +466,192 @@ async function handleFiles(files) {
 async function loadUploads() {
   try { state.uploads = await api("/api/uploads"); } catch (e) { toast(e.message, "error"); }
   renderMedia();
+  renderScenes();
   renderMusicSelect();
   renderPreview();
+}
+
+// ------------------------------------------------------------------ ИИ-картинки
+
+function sceneMediaId(sc) {
+  if (!sc) return null;
+  return sc.use_video && sc.video ? sc.video : sc.image;
+}
+function renderAiStatus() {
+  const el = $("#aiStatus");
+  const st = state.status?.settings;
+  if (!el || !st) return;
+  if (st.ai_ready) {
+    el.className = "ai-status ok";
+    el.innerHTML = `<span>Нейросеть: <b>${esc(st.ai_label)}</b>${st.ai_video ? " · можно делать и видео" : " · только картинки"}</span><button class="link-btn" data-open-settings>изменить</button>`;
+  } else {
+    el.className = "ai-status bad";
+    el.innerHTML = `<span>Нейросеть не подключена. Бесплатно — Cloudflare Workers AI, с видео — Pollinations.</span><button class="btn secondary" data-open-settings>Подключить</button>`;
+  }
+}
+function scenesStale() {
+  const scenes = state.project.background.ai_scenes;
+  if (!scenes.length) return false;
+  const norm = (t) => t.replace(/\p{Extended_Pictographic}/gu, "").replace(/\s+/g, " ").trim();
+  return norm(scenes.map((s) => s.text).join(" ")) !== norm(state.project.text || "");
+}
+function renderScenes() {
+  const box = $("#aiScenes");
+  if (!box || !state.project) return;
+  const scenes = state.project.background.ai_scenes;
+  const byId = Object.fromEntries(state.uploads.map((u) => [u.id, u]));
+  const canVideo = !!state.status?.settings?.ai_video;
+  let html = "";
+  if (scenesStale()) html += `<div class="stale">Текст изменился — нажмите «Придумать кадры», чтобы обновить сцены. Уже нарисованные картинки для неизменённых фраз сохранятся.</div>`;
+  if (!scenes.length) html += `<p class="hint">Сцен пока нет. Нажмите «Придумать кадры» — текст разделится на сцены по 3–6 секунд, и для каждой нейросеть опишет кадр.</p>`;
+  html += scenes.map((sc, i) => {
+    const media = byId[sceneMediaId(sc)];
+    const busy = state.aiBusy[i];
+    const pic = media?.thumb_url ? `style="background-image:url('${esc(media.thumb_url)}')"` : "";
+    const tag = sc.use_video && sc.video ? `<span class="tag">видео</span>` : "";
+    const video = canVideo
+      ? `<button class="btn secondary" data-ai-act="video" ${busy ? "disabled" : ""}>🎬 ${sc.video ? "Новое видео" : "Сделать видео"}</button>` +
+        (sc.video ? `<label class="switch"><input type="checkbox" data-ai-act="use-video" ${sc.use_video ? "checked" : ""}><span>видео вместо картинки</span></label>` : "")
+      : "";
+    return `<div class="scene" data-i="${i}">
+      <div class="pic ${busy ? "busy" : ""}" ${pic}>${media ? "" : "нет<br>картинки"}${tag}</div>
+      <div class="body">
+        <div class="head"><span>Сцена ${i + 1}</span><span>~${sc.seconds ?? "?"} сек</span></div>
+        <div class="say">«${esc(sc.text)}»</div>
+        <textarea data-ai-prompt placeholder="Описание кадра для нейросети (лучше на английском)">${esc(sc.prompt)}</textarea>
+        <div class="acts">
+          <button class="btn secondary" data-ai-act="image" ${busy ? "disabled" : ""}>🎨 ${sc.image ? "Перерисовать" : "Нарисовать"}</button>
+          ${video}
+          <span class="state ${busy?.startsWith("Ошибка") ? "err" : ""}">${esc(busy || "")}</span>
+        </div>
+      </div></div>`;
+  }).join("");
+  box.innerHTML = html;
+}
+async function aiMakeScenes(rewrite = false) {
+  if (!state.project.text.trim()) {
+    toast("Сначала введите текст ролика", "error");
+    return false;
+  }
+  const btn = $("#aiScenesBtn");
+  btn.disabled = true;
+  btn.textContent = "Придумываю…";
+  try {
+    const bg = state.project.background;
+    const data = await api("/api/ai/scenes", {
+      method: "POST",
+      body: { text: state.project.text, context: bg.ai_context, scenes: bg.ai_scenes, rewrite },
+    });
+    bg.ai_scenes = data.scenes;
+    state.aiBusy = {};
+    if (data.warning) toast(data.warning, "error", 9000);
+    saveDraft();
+    renderScenes();
+    renderPreview();
+    return true;
+  } catch (e) {
+    toast(e.message, "error", 9000);
+    return false;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Придумать кадры";
+  }
+}
+async function aiGenerate(i, kind) {
+  const sc = state.project.background.ai_scenes[i];
+  if (!sc || state.aiBusy[i] && !state.aiBusy[i].startsWith("Ошибка")) return;
+  if (!sc.prompt.trim()) {
+    toast("Сначала опишите кадр (или нажмите «Придумать кадры»)", "error");
+    return;
+  }
+  state.aiBusy[i] = kind === "video" ? "Делаю видео — это может занять несколько минут…" : "Рисую…";
+  renderScenes();
+  try {
+    const style = state.project.background.ai_style;
+    const meta = kind === "video"
+      ? await api("/api/ai/video", { method: "POST", body: { prompt: sc.prompt, style, seconds: sc.seconds || 4 } })
+      : await api("/api/ai/image", { method: "POST", body: { prompt: sc.prompt, style } });
+    if (kind === "video") {
+      sc.video = meta.id;
+      sc.use_video = true;
+    } else {
+      sc.image = meta.id;
+      sc.use_video = false;
+    }
+    delete state.aiBusy[i];
+    saveDraft();
+    await loadUploads();
+  } catch (e) {
+    state.aiBusy[i] = "Ошибка: " + e.message;
+    renderScenes();
+    throw e;
+  }
+}
+async function aiDrawAll() {
+  const btn = $("#aiDrawBtn");
+  btn.disabled = true;
+  try {
+    const bg = state.project.background;
+    if ((!bg.ai_scenes.length || scenesStale() || bg.ai_scenes.some((s) => !s.prompt.trim())) && !(await aiMakeScenes())) return;
+    const todo = bg.ai_scenes.map((s, i) => (sceneMediaId(s) ? -1 : i)).filter((i) => i >= 0);
+    if (!todo.length) {
+      toast("Все кадры уже нарисованы. Чтобы заменить кадр — нажмите «Перерисовать» у сцены.");
+      return;
+    }
+    for (const [n, i] of todo.entries()) {
+      btn.textContent = `Рисую ${n + 1} из ${todo.length}…`;
+      try {
+        await aiGenerate(i, "image");
+      } catch (e) {
+        toast(e.message, "error", 10000);
+        return;
+      }
+    }
+    toast("Картинки готовы — можно создавать видео");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Нарисовать все";
+  }
+}
+function setupAi() {
+  $("#aiStyle").innerHTML = Object.entries(state.status.ai_styles || {})
+    .map(([k, label]) => `<option value="${esc(k)}">${esc(label)}</option>`)
+    .join("");
+  $("#aiScenesBtn").addEventListener("click", () => {
+    const scenes = state.project.background.ai_scenes;
+    const rewrite = scenes.length > 0 && !scenesStale();
+    if (rewrite && !confirm("Придумать описания всех кадров заново? Ваши правки в описаниях заменятся, картинки останутся.")) return;
+    aiMakeScenes(rewrite);
+  });
+  $("#aiDrawBtn").addEventListener("click", aiDrawAll);
+  const box = $("#aiScenes");
+  box.addEventListener("input", (e) => {
+    const ta = e.target.closest("[data-ai-prompt]");
+    if (!ta) return;
+    const i = Number(ta.closest(".scene").dataset.i);
+    state.project.background.ai_scenes[i].prompt = ta.value;
+    saveDraft();
+  });
+  box.addEventListener("click", (e) => {
+    const el = e.target.closest("[data-ai-act]");
+    if (!el || el.type === "checkbox") return;
+    const i = Number(el.closest(".scene").dataset.i);
+    if (el.dataset.aiAct === "video" && !confirm("Видео делается платно и дольше картинки (обычно 1–5 минут). Продолжить?")) return;
+    aiGenerate(i, el.dataset.aiAct).catch((err) => toast(err.message, "error", 10000));
+  });
+  box.addEventListener("change", (e) => {
+    const el = e.target.closest('[data-ai-act="use-video"]');
+    if (!el) return;
+    const i = Number(el.closest(".scene").dataset.i);
+    state.project.background.ai_scenes[i].use_video = el.checked;
+    saveDraft();
+    renderScenes();
+    renderPreview();
+  });
+  // Кнопки «Подключить» внутри статуса появляются динамически.
+  document.addEventListener("click", (e) => {
+    if (e.target.closest("#aiStatus [data-open-settings]")) openSettings();
+  });
 }
 
 // ------------------------------------------------------------------ музыка
@@ -502,8 +691,9 @@ function renderPreview() {
       bg.classList.add("animated");
       bg.style.animationDuration = `${Math.max(3, 3600 / p.background.gradient_speed / 10)}s`;
     }
-  } else if (p.background.type === "media") {
-    const first = state.uploads.find((u) => u.id === p.background.media[0]);
+  } else if (p.background.type === "media" || p.background.type === "ai") {
+    const firstId = p.background.type === "ai" ? sceneMediaId(p.background.ai_scenes[0]) : p.background.media[0];
+    const first = state.uploads.find((u) => u.id === firstId);
     bg.style.backgroundImage = first?.thumb_url ? `url("${first.thumb_url}")` : "linear-gradient(160deg,#1d1d28,#0d0d12)";
   } else {
     bg.style.backgroundImage = "linear-gradient(160deg,#243b55,#141e30)";
@@ -624,7 +814,7 @@ function showJobError(message, stage) {
   $("#cancelBtn").hidden = true;
   const where = stage && stage !== "Ошибка" ? ` на этапе «${esc(stage)}»` : "";
   let action = "";
-  if (/бесплатный ключ|ключ API|ключ Pexels/i.test(message)) action = `<button class="btn secondary" data-fix="settings">Открыть настройки</button>`;
+  if (/бесплатный ключ|ключ API|ключ Pexels|Настройках|токен/i.test(message)) action = `<button class="btn secondary" data-fix="settings">Открыть настройки</button>`;
   else if (/фон/i.test(message)) action = `<button class="btn secondary" data-fix="bg">Перейти на вкладку «Фон»</button>`;
   else if (/музык/i.test(message)) action = `<button class="btn secondary" data-fix="music">Перейти на вкладку «Музыка»</button>`;
   const el = $("#jobError");
@@ -665,6 +855,11 @@ async function pollJob() {
     showVideo(r.url);
     toast(`Видео готово: ${fmtDuration(r.duration)}, собрано за ${r.render_seconds} с`);
     loadVideos();
+    if (r.ai_scenes) {
+      state.project.background.ai_scenes = r.ai_scenes;
+      saveDraft();
+      loadUploads().then(renderScenes);
+    }
   } else if (job.status === "error") {
     showJobError(job.error || "Неизвестная ошибка — откройте «Подробности»", job.failed_stage);
   } else {
@@ -751,17 +946,42 @@ async function openSettings() {
     form.proxy.value = s.proxy || "";
     form.pexels_api_key.value = "";
     $("#pexelsHint").textContent = s.pexels_api_key_set ? `(сохранён ${s.pexels_api_key_hint})` : "(не указан)";
+    form.ai_provider.value = s.ai_provider || "";
+    form.cf_account_id.value = s.cf_account_id || "";
+    form.cf_api_token.value = "";
+    form.cf_image_model.value = s.cf_image_model || "flux";
+    form.pollinations_key.value = "";
+    form.pollinations_image_model.value = s.pollinations_image_model || "";
+    form.pollinations_video_model.value = s.pollinations_video_model || "";
+    $("#cfTokenHint").textContent = s.cf_api_token_set ? `(сохранён ${s.cf_api_token_hint})` : "(не указан)";
+    $("#polKeyHint").textContent = s.pollinations_key_set ? `(сохранён ${s.pollinations_key_hint})` : "(не указан)";
+    showAiSettings();
   } catch (e) { toast(e.message, "error"); }
-  dlg.showModal();
+  if (!dlg.open) dlg.showModal();
+}
+function showAiSettings() {
+  const provider = $("#settingsForm").ai_provider.value;
+  $$(".ai-settings").forEach((el) => { el.hidden = el.dataset.ai !== provider; });
 }
 async function saveSettings(extra = {}) {
   const form = $("#settingsForm");
-  const body = { proxy: form.proxy.value.trim(), ...extra };
-  if (form.pexels_api_key.value.trim()) body.pexels_api_key = form.pexels_api_key.value.trim();
+  const body = {
+    proxy: form.proxy.value.trim(),
+    ai_provider: form.ai_provider.value,
+    cf_account_id: form.cf_account_id.value.trim(),
+    cf_image_model: form.cf_image_model.value,
+    pollinations_image_model: form.pollinations_image_model.value.trim(),
+    pollinations_video_model: form.pollinations_video_model.value.trim(),
+    ...extra,
+  };
+  for (const secret of ["pexels_api_key", "cf_api_token", "pollinations_key"]) {
+    if (form[secret].value.trim()) body[secret] = form[secret].value.trim();
+  }
   try {
     const s = await api("/api/settings", { method: "POST", body });
     state.status.settings = s;
     showBgSection();
+    renderScenes();
     $("#settingsDialog").close();
     toast("Настройки сохранены");
   } catch (e) { toast(e.message, "error"); }
@@ -771,6 +991,7 @@ function setupSettings() {
   $$("[data-open-settings]").forEach((b) => b.addEventListener("click", openSettings));
   $("#saveSettings").addEventListener("click", () => saveSettings());
   $("#clearPexels").addEventListener("click", () => saveSettings({ pexels_api_key: "" }));
+  $("#settingsForm").ai_provider.addEventListener("change", showAiSettings);
 }
 
 // ------------------------------------------------------------------ запуск
@@ -813,6 +1034,7 @@ async function init() {
   setupPresets();
   setupBackground();
   setupMedia();
+  setupAi();
   setupPreview();
   setupRender();
   setupGallery();

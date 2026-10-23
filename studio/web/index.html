@@ -185,6 +185,7 @@
         <div class="segmented" id="bgType">
           <button data-value="gradient">Градиент</button>
           <button data-value="media">Мои фото и видео</button>
+          <button data-value="ai">ИИ-картинки ✨</button>
           <button data-value="pexels">Стоки Pexels</button>
         </div>
 
@@ -217,6 +218,24 @@
           <div class="library" id="mediaLibrary"></div>
         </div>
 
+        <div class="bg-section" data-bg="ai">
+          <div class="ai-status" id="aiStatus"></div>
+          <label class="field">
+            <span>О чём ролик <em>(необязательно — помогает нейросети придумать точные кадры)</em></span>
+            <input type="text" data-bind="background.ai_context" maxlength="500" placeholder="Например: реклама Telegram-бота, который сохраняет удалённые сообщения">
+          </label>
+          <div class="row">
+            <label class="field grow">
+              <span>Стиль картинок</span>
+              <select data-bind="background.ai_style" id="aiStyle"></select>
+            </label>
+            <button class="btn secondary" id="aiScenesBtn">Придумать кадры</button>
+            <button class="btn primary" id="aiDrawBtn">Нарисовать все</button>
+          </div>
+          <p class="hint">Можно сразу нажать «Создать видео» — сцены и картинки придумаются сами. Здесь можно посмотреть кадры заранее, поправить описание и перерисовать неудачные.</p>
+          <div class="scenes" id="aiScenes"></div>
+        </div>
+
         <div class="bg-section" data-bg="pexels">
           <p class="hint">Бесплатные вертикальные видео с <a href="https://www.pexels.com/api/" target="_blank" rel="noopener">Pexels</a>. Нужен бесплатный ключ API — укажите его в <button class="link-btn" data-open-settings>настройках</button>.</p>
           <label class="field">
@@ -235,7 +254,7 @@
                 <option value="blur">Целиком на размытом фоне</option>
               </select>
             </label>
-            <label class="field grow">
+            <label class="field grow not-ai">
               <span>Смена кадров</span>
               <select data-bind="background.switch">
                 <option value="auto">Равномерно, по предложениям</option>
@@ -244,7 +263,7 @@
             </label>
           </div>
           <div class="row">
-            <label class="field grow">
+            <label class="field grow not-ai">
               <span>Длина сцены до <output data-out="background.max_segment" data-zero="без нарезки" data-suffix=" сек"></output></span>
               <input type="range" min="0" max="20" step="0.5" data-bind="background.max_segment">
             </label>
@@ -375,12 +394,60 @@
       <small class="hint">Бесплатно на <a href="https://www.pexels.com/api/" target="_blank" rel="noopener">pexels.com/api</a>. Нужен только для фона «Стоки Pexels».</small>
     </label>
     <label class="field">
-      <span>Прокси для озвучки и Pexels <em>(необязательно)</em></span>
+      <span>Прокси для озвучки, Pexels и нейросетей <em>(необязательно)</em></span>
       <input type="text" name="proxy" placeholder="http://127.0.0.1:8080">
-      <small class="hint">Пригодится, если сервис озвучки Microsoft недоступен из вашей сети.</small>
+      <small class="hint">Пригодится, если какой-то сервис недоступен из вашей сети.</small>
     </label>
+
+    <h3 class="sub-head">Нейросети для картинок и видео</h3>
+    <label class="field">
+      <span>Сервис</span>
+      <select name="ai_provider">
+        <option value="">Не выбран</option>
+        <option value="cloudflare">Cloudflare Workers AI — бесплатно, картинки</option>
+        <option value="pollinations">Pollinations — платно, картинки и видео</option>
+      </select>
+    </label>
+    <div class="ai-settings" data-ai="cloudflare">
+      <div class="row">
+        <label class="field grow">
+          <span>Account ID</span>
+          <input type="text" name="cf_account_id" autocomplete="off" placeholder="32 символа из панели Cloudflare">
+        </label>
+        <label class="field grow">
+          <span>API-токен <em id="cfTokenHint"></em></span>
+          <input type="password" name="cf_api_token" autocomplete="off" placeholder="вставьте, чтобы изменить">
+        </label>
+      </div>
+      <label class="field">
+        <span>Модель</span>
+        <select name="cf_image_model">
+          <option value="flux">FLUX.1 schnell — лучше качество (квадрат)</option>
+          <option value="sdxl">SDXL Lightning — вертикальные кадры</option>
+        </select>
+      </label>
+      <small class="hint">Как подключить: зарегистрируйтесь на <a href="https://dash.cloudflare.com/sign-up" target="_blank" rel="noopener">cloudflare.com</a> (бесплатно, без карты) → в панели откройте <b>AI → Workers AI</b> → <b>Use REST API</b>: скопируйте Account ID и создайте API-токен. Бесплатно 10 000 «нейронов» в сутки — это десятки картинок.</small>
+    </div>
+    <div class="ai-settings" data-ai="pollinations">
+      <label class="field">
+        <span>Ключ API <em id="polKeyHint"></em></span>
+        <input type="password" name="pollinations_key" autocomplete="off" placeholder="sk_… (вставьте, чтобы изменить)">
+      </label>
+      <div class="row">
+        <label class="field grow">
+          <span>Модель картинок <em>(необязательно)</em></span>
+          <input type="text" name="pollinations_image_model" autocomplete="off" placeholder="по умолчанию">
+        </label>
+        <label class="field grow">
+          <span>Модель видео <em>(необязательно)</em></span>
+          <input type="text" name="pollinations_video_model" autocomplete="off" placeholder="по умолчанию">
+        </label>
+      </div>
+      <small class="hint">Ключ создаётся на <a href="https://enter.pollinations.ai" target="_blank" rel="noopener">enter.pollinations.ai</a>. Оплата — в Pollen (≈ 1 Pollen за $1): картинка стоит доли цента, видео заметно дороже. Список моделей: <a href="https://gen.pollinations.ai/image/models" target="_blank" rel="noopener">gen.pollinations.ai/image/models</a>.</small>
+    </div>
+
     <div class="dialog-actions">
-      <button type="button" class="btn ghost" id="clearPexels">Удалить ключ</button>
+      <button type="button" class="btn ghost" id="clearPexels">Удалить ключ Pexels</button>
       <span class="grow"></span>
       <button value="cancel" class="btn secondary">Закрыть</button>
       <button type="button" class="btn primary" id="saveSettings">Сохранить</button>

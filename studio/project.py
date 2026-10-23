@@ -6,6 +6,7 @@ import copy
 import re
 
 from . import config
+from .ai import DEFAULT_STYLE, STYLES
 from .backgrounds import GRADIENT_PRESETS
 
 DEFAULT_PROJECT: dict = {
@@ -31,11 +32,15 @@ DEFAULT_PROJECT: dict = {
         "animation": "pop",
     },
     "background": {
-        "type": "gradient",  # gradient | media | pexels
+        "type": "gradient",  # gradient | media | ai | pexels
         "gradient": list(GRADIENT_PRESETS["night"]),
         "gradient_speed": 30,
         "media": [],  # id загруженных файлов по порядку
         "pexels_query": "",
+        # ИИ-картинки: сцены с промтами и id сгенерированных файлов
+        "ai_scenes": [],
+        "ai_style": DEFAULT_STYLE,
+        "ai_context": "",
         "fit": "cover",  # cover | blur
         "motion": True,
         "dim": 0.25,
@@ -122,7 +127,7 @@ def normalize(data: dict) -> dict:
 
     b = p["background"]
     db = d["background"]
-    b["type"] = _choice(b.get("type"), ("gradient", "media", "pexels"), "gradient")
+    b["type"] = _choice(b.get("type"), ("gradient", "media", "ai", "pexels"), "gradient")
     grad = b.get("gradient")
     if isinstance(grad, str) and grad in GRADIENT_PRESETS:
         grad = GRADIENT_PRESETS[grad]
@@ -132,6 +137,22 @@ def normalize(data: dict) -> dict:
     b["gradient_speed"] = _num(b.get("gradient_speed"), 30, 0, 200)
     b["media"] = [str(x) for x in (b.get("media") or []) if isinstance(x, str)][:50]
     b["pexels_query"] = str(b.get("pexels_query") or "")[:500]
+    b["ai_style"] = _choice(b.get("ai_style"), STYLES, DEFAULT_STYLE)
+    b["ai_context"] = str(b.get("ai_context") or "")[:500]
+    scenes = []
+    for sc in b.get("ai_scenes") or []:
+        if not isinstance(sc, dict):
+            continue
+        scenes.append(
+            {
+                "text": str(sc.get("text") or "")[:1000],
+                "prompt": str(sc.get("prompt") or "")[:1500],
+                "image": str(sc["image"]) if sc.get("image") else None,
+                "video": str(sc["video"]) if sc.get("video") else None,
+                "use_video": bool(sc.get("use_video")),
+            }
+        )
+    b["ai_scenes"] = scenes[:30]
     b["fit"] = _choice(b.get("fit"), ("cover", "blur"), "cover")
     b["motion"] = bool(b.get("motion"))
     b["dim"] = _num(b.get("dim"), db["dim"], 0, 0.85)
