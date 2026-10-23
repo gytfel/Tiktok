@@ -9,10 +9,5 @@ if ! command -v "$PY" >/dev/null 2>&1; then
   exit 1
 fi
 
-if [ ! -x .venv/bin/python ]; then
-  echo "Первый запуск: создаю окружение и устанавливаю зависимости..."
-  "$PY" -m venv .venv
-fi
-
-.venv/bin/python -m pip install -q --disable-pip-version-check -r requirements.txt
-exec .venv/bin/python run.py "$@"
+# Окружение, зависимости и запуск готовит launcher.py.
+exec "$PY" launcher.py "$@"

@@ -41,7 +41,7 @@ def _check_id(item_id: str) -> str:
 # ------------------------------------------------------------- загрузки
 
 
-def save_upload(filename: str, stream: BinaryIO) -> dict:
+def save_upload(filename: str, stream: BinaryIO, extra: dict | None = None) -> dict:
     config.ensure_dirs()
     kind = kind_of(filename)
     if not kind:
@@ -62,6 +62,7 @@ def save_upload(filename: str, stream: BinaryIO) -> dict:
         "width": None,
         "height": None,
         "thumb": None,
+        **(extra or {}),
     }
     try:
         info = probe(path)

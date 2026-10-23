@@ -24,6 +24,7 @@ class Job:
     log: list[str] = field(default_factory=list)
     result: dict | None = None
     error: str | None = None
+    failed_stage: str | None = None
     created: float = field(default_factory=time.time)
     finished: float | None = None
     cancel_event: threading.Event = field(default_factory=threading.Event)
@@ -36,6 +37,7 @@ class Job:
             "progress": round(self.progress * 100, 1),
             "result": self.result,
             "error": self.error,
+            "failed_stage": self.failed_stage,
             "created": self.created,
             "finished": self.finished,
         }
@@ -116,12 +118,14 @@ class JobManager:
             job.stage = "Готово"
             job.progress = 1.0
         except RenderError as exc:
+            job.failed_stage = job.stage
             cancelled = job.cancel_event.is_set()
             job.status = "cancelled" if cancelled else "error"
             job.error = None if cancelled else str(exc)
             job.stage = "Отменено" if cancelled else "Ошибка"
             on_log(str(exc))
         except Exception as exc:  # неожиданные ошибки тоже показываем пользователю
+            job.failed_stage = job.stage
             job.status = "error"
             job.error = f"{type(exc).__name__}: {exc}"
             job.stage = "Ошибка"

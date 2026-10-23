@@ -228,6 +228,9 @@ input[type="color"]::-webkit-color-swatch { border: none; border-radius: 5px; }
 .progress { height: 8px; background: #2a2a38; border-radius: 6px; overflow: hidden; margin: 10px 0; }
 .progress div { height: 100%; width: 0; background: var(--accent); transition: width .3s ease; }
 .job.error .progress div { background: #ff4d6a; }
+.job-error { background: rgba(255, 77, 106, .1); border: 1px solid rgba(255, 77, 106, .45); color: #ffc2cd; border-radius: 9px; padding: 10px 12px; margin-bottom: 10px; font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.job-error b { color: #fff; }
+.job-error .btn { margin-top: 10px; padding: 7px 12px; font-size: 13px; }
 .log { max-height: 220px; overflow: auto; font-size: 11px; background: #0c0c12; border-radius: 8px; padding: 8px; white-space: pre-wrap; word-break: break-all; color: #b8b8c8; margin: 10px 0 0; }
 .result { display: flex; gap: 10px; margin-top: 14px; flex-wrap: wrap; }
 .result .btn { flex: 1; }
@@ -256,3 +259,26 @@ dialog::backdrop { background: rgba(0,0,0,.6); backdrop-filter: blur(3px); }
 .toasts { position: fixed; right: 18px; bottom: 18px; display: flex; flex-direction: column; gap: 8px; z-index: 100; max-width: min(420px, calc(100vw - 36px)); }
 .toast { background: #1f1f2b; border: 1px solid var(--line); border-left: 3px solid var(--cyan); padding: 11px 14px; border-radius: 10px; box-shadow: var(--shadow); animation: fade .2s ease; white-space: pre-wrap; }
 .toast.error { border-left-color: #ff4d6a; }
+
+/* ---------- ИИ-картинки ---------- */
+.ai-status { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; margin-bottom: 14px; font-size: 13px; }
+.ai-status.ok { border-color: rgba(124, 240, 176, .35); }
+.ai-status.bad { border-color: rgba(255, 141, 161, .45); }
+.scenes { display: flex; flex-direction: column; gap: 12px; margin-top: 6px; }
+.scenes .stale { background: rgba(255, 200, 80, .08); border: 1px solid rgba(255, 200, 80, .35); color: #ffe2a6; border-radius: 10px; padding: 9px 12px; font-size: 13px; }
+.scene { display: grid; grid-template-columns: 96px 1fr; gap: 12px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 12px; padding: 10px; }
+.scene .pic { position: relative; aspect-ratio: 9 / 16; border-radius: 9px; overflow: hidden; background: #0e0e14 center / cover no-repeat; display: grid; place-items: center; color: var(--muted); font-size: 11px; text-align: center; }
+.scene .pic.busy::after { content: ""; position: absolute; inset: 0; background: rgba(0,0,0,.45) linear-gradient(90deg, transparent, rgba(255,255,255,.12), transparent) 0 0 / 200% 100%; animation: shimmer 1.2s linear infinite; }
+@keyframes shimmer { to { background-position: -200% 0; } }
+.scene .pic .tag { position: absolute; left: 4px; top: 4px; background: rgba(0,0,0,.7); color: #fff; font-size: 10.5px; padding: 1px 5px; border-radius: 5px; }
+.scene .body { min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.scene .head { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; color: var(--muted); }
+.scene .say { font-size: 13px; color: var(--text); }
+.scene textarea { min-height: 64px; font-size: 12.5px; line-height: 1.4; padding: 8px 10px; resize: vertical; }
+.scene .acts { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.scene .acts .btn { padding: 6px 10px; font-size: 12.5px; }
+.scene .acts .switch { margin: 0 0 0 4px; font-size: 12.5px; }
+.scene .state { font-size: 12px; color: var(--muted); }
+.scene .state.err { color: #ff9aac; }
+dialog { max-height: calc(100vh - 32px); overflow: auto; }
+.ai-settings { border-left: 2px solid var(--line); padding-left: 12px; margin-bottom: 12px; }

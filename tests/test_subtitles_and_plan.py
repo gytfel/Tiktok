@@ -1,6 +1,10 @@
 from pathlib import Path
 
+import pytest
+
+from studio import config
 from studio.backgrounds import MediaItem, plan_segments
+from studio.pipeline import RenderError, check_sources
 from studio.project import normalize
 from studio.subtitles import SubtitleStyle, TitleStyle, ass_color, ass_tag_color, build_ass, build_chunks, build_srt, layout_lines
 from studio.text_utils import tokenize
@@ -100,3 +104,16 @@ def test_normalize_clamps_and_fills_defaults():
     assert p["subtitles"]["color"] == "#FFFFFF"
     assert "junk" not in p
     assert p["background"]["type"] == "gradient"
+
+
+def test_check_sources_reports_background_problems_before_tts(monkeypatch):
+    monkeypatch.setattr(config, "load_settings", lambda: {"pexels_api_key": ""})
+    with pytest.raises(RenderError, match="Не выбраны файлы для фона"):
+        check_sources(normalize({"background": {"type": "media", "media": []}}))
+    with pytest.raises(RenderError, match="ключевые слова"):
+        check_sources(normalize({"background": {"type": "pexels", "pexels_query": " , "}}))
+    with pytest.raises(RenderError, match="бесплатный ключ"):
+        check_sources(normalize({"background": {"type": "pexels", "pexels_query": "город"}}))
+    with pytest.raises(RenderError, match="Музыка"):
+        check_sources(normalize({"music": {"file": "deadbeef0000", "volume": 0.2}}))
+    assert check_sources(normalize({})).items == []  # градиент без музыки — всё в порядке

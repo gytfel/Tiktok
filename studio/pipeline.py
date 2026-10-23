@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from . import backgrounds, config, library, pexels, tts
+from . import ai, backgrounds, config, library, pexels, tts
 from .ffmpeg_utils import FFmpegError, detect_speech_spans, media_duration, prepare_voice, probe, run_ffmpeg
 from .project import normalize
 from .subtitles import SubtitleStyle, TitleStyle, build_ass, build_srt
@@ -36,16 +36,76 @@ class RenderContext:
     on_log: Callable[[str], None] = print
     on_progress: Callable[[str, float], None] = lambda stage, value: None
     cancel_event: threading.Event = field(default_factory=threading.Event)
+    # Доля общего прогресса, которую занимает текущая часть работы.
+    lo: float = 0.0
+    hi: float = 1.0
 
     def log(self, msg: str) -> None:
         self.on_log(msg)
 
     def progress(self, stage: str, value: float) -> None:
-        self.on_progress(stage, max(0.0, min(1.0, value)))
+        value = max(0.0, min(1.0, value))
+        self.on_progress(stage, self.lo + (self.hi - self.lo) * value)
 
     def check_cancel(self) -> None:
         if self.cancel_event.is_set():
             raise RenderError("Отменено пользователем")
+
+
+@dataclass
+class Sources:
+    """Файлы для фона и музыки, проверенные до начала озвучки."""
+
+    items: list[backgrounds.MediaItem] = field(default_factory=list)
+    pexels_queries: list[str] = field(default_factory=list)
+    pexels_key: str = ""
+    music_path: Path | None = None
+    ai_scenes: list[dict] = field(default_factory=list)
+
+
+def _scene_media(scene: dict) -> str | None:
+    if scene.get("use_video") and scene.get("video"):
+        return scene["video"]
+    return scene.get("image")
+
+
+def check_sources(p: dict) -> Sources:
+    """Проверяет настройки фона и музыки сразу, чтобы не ждать озвучку ради ошибки в них."""
+    b = p["background"]
+    src = Sources()
+    if b["type"] == "media":
+        if not b["media"]:
+            raise RenderError(
+                "Не выбраны файлы для фона. На вкладке «Фон → Мои фото и видео» загрузите клипы "
+                "или фото и проверьте, что они есть в блоке «В ролике». Либо выберите фон «Градиент»."
+            )
+        try:
+            src.items = [library.media_item(mid) for mid in b["media"]]
+        except library.LibraryError as exc:
+            raise RenderError(str(exc)) from exc
+    elif b["type"] == "ai":
+        src.ai_scenes = ai.sync_scenes(clean_text(p["text"]), b["ai_scenes"])
+        if not src.ai_scenes:
+            raise RenderError("Введите текст ролика — по нему придумываются сцены для ИИ-картинок")
+        if any(not _scene_media(sc) for sc in src.ai_scenes) and ai.get_provider() is None:
+            raise RenderError(ai.NO_PROVIDER)
+    elif b["type"] == "pexels":
+        src.pexels_queries = [q.strip() for q in b["pexels_query"].replace("\n", ",").split(",") if q.strip()]
+        if not src.pexels_queries:
+            raise RenderError("Для фона «Стоки Pexels» укажите ключевые слова через запятую, например: ночной город, телефон")
+        src.pexels_key = config.load_settings().get("pexels_api_key", "")
+        if not src.pexels_key:
+            raise RenderError(
+                "Для фона «Стоки Pexels» нужен бесплатный ключ: получите его на pexels.com/api "
+                "и вставьте в ⚙ Настройках. Либо выберите другой фон."
+            )
+    music = p["music"]
+    if music["file"] and music["volume"] > 0:
+        try:
+            src.music_path = library.audio_path(music["file"])
+        except library.LibraryError as exc:
+            raise RenderError(f"Музыка: {exc}") from exc
+    return src
 
 
 def render(project: dict, ctx: RenderContext, synthesize: Callable | None = None) -> dict:
@@ -57,8 +117,19 @@ def render(project: dict, ctx: RenderContext, synthesize: Callable | None = None
     tokens = tokenize(text)
     if not tokens:
         raise RenderError("В тексте нет слов для озвучки")
+    sources = check_sources(p)
     ctx.job_dir.mkdir(parents=True, exist_ok=True)
     started = time.time()
+
+    # 0. ИИ-картинки для сцен (до озвучки, чтобы ошибки сервиса всплывали сразу)
+    ai_items: list[backgrounds.MediaItem] = []
+    if p["background"]["type"] == "ai":
+        generating = any(not _scene_media(sc) for sc in sources.ai_scenes)
+        if generating:
+            ctx.lo, ctx.hi = 0.0, 0.4
+        ai_items = _prepare_ai_scenes(p, sources.ai_scenes, ctx)
+        if generating:
+            ctx.lo, ctx.hi = 0.4, 1.0
 
     # 1. Озвучка
     v = p["voice"]
@@ -100,43 +171,41 @@ def render(project: dict, ctx: RenderContext, synthesize: Callable | None = None
         image = backgrounds.make_gradient_image(b["gradient"], ctx.job_dir / "gradient.png")
         graph = backgrounds.gradient_graph(image, total, b["gradient_speed"])
     else:
-        if b["type"] == "pexels":
-            queries = [q.strip() for q in b["pexels_query"].replace("\n", ",").split(",") if q.strip()]
-            if not queries:
-                raise RenderError("Укажите ключевые слова для поиска видео на Pexels")
-            key = config.load_settings().get("pexels_api_key", "")
-            try:
-                paths = pexels.fetch_clips(queries, key, log=ctx.log)
-            except pexels.PexelsError as exc:
-                raise RenderError(str(exc)) from exc
-            items = [backgrounds.MediaItem(path, "video", probe(path)["duration"]) for path in paths]
+        if b["type"] == "ai":
+            # Каждая сцена начинается вместе с первым своим словом в озвучке.
+            start_times = []
+            for sc in sources.ai_scenes:
+                tok = next((t for t in tokens if t.start_char >= sc["start_char"]), tokens[-1])
+                start_times.append(tok.start)
+            segments = backgrounds.plan_scene_segments(ai_items, start_times, total)
         else:
-            if not b["media"]:
-                raise RenderError("Добавьте картинки или видео для фона (или выберите градиент)")
-            try:
-                items = [library.media_item(mid) for mid in b["media"]]
-            except library.LibraryError as exc:
-                raise RenderError(str(exc)) from exc
-        segments = backgrounds.plan_segments(items, tokens, total, b["switch"], b["max_segment"])
+            items = sources.items
+            if b["type"] == "pexels":
+                try:
+                    paths = pexels.fetch_clips(sources.pexels_queries, sources.pexels_key, log=ctx.log)
+                except pexels.PexelsError as exc:
+                    raise RenderError(str(exc)) from exc
+                items = [backgrounds.MediaItem(path, "video", probe(path)["duration"]) for path in paths]
+            segments = backgrounds.plan_segments(items, tokens, total, b["switch"], b["max_segment"])
         ctx.log("Сцены: " + ", ".join(f"{seg.item.path.name} {seg.start:.1f}-{seg.end:.1f}c" for seg in segments))
         graph = backgrounds.media_graph(segments, b["fit"], b["motion"], b["transition"])
     ctx.check_cancel()
 
     # 5. Звук: голос + музыка
+    ctx.progress("Обработка звука", 0.18)
     voice_wav = ctx.job_dir / "voice_ready.wav"
-    prepare_voice(result.audio_path, voice_wav, total, config.LEAD_IN)
+    try:
+        prepare_voice(result.audio_path, voice_wav, total, config.LEAD_IN)
+    except FFmpegError as exc:
+        raise RenderError(f"Не удалось обработать озвучку: {exc}") from exc
     inputs = list(graph.inputs)
     filters = list(graph.filters)
     voice_idx = graph.input_count
     inputs += ["-i", str(voice_wav)]
     audio_out = f"{voice_idx}:a"
     music = p["music"]
-    if music["file"] and music["volume"] > 0:
-        try:
-            music_path = library.audio_path(music["file"])
-        except library.LibraryError as exc:
-            raise RenderError(str(exc)) from exc
-        inputs += ["-stream_loop", "-1", "-i", str(music_path)]
+    if sources.music_path:
+        inputs += ["-stream_loop", "-1", "-i", str(sources.music_path)]
         fade_start = max(0.0, total - 1.5)
         filters.append(
             f"[{voice_idx + 1}:a]aformat=sample_rates=48000:channel_layouts=stereo,"
@@ -210,4 +279,39 @@ def render(project: dict, ctx: RenderContext, synthesize: Callable | None = None
     ctx.progress("Готово", 1.0)
     ctx.log(f"Готово: {final.name} ({total:.1f} c) за {meta['render_seconds']} c")
     (ctx.job_dir / "project.json").write_text(json.dumps(p, ensure_ascii=False, indent=2), encoding="utf-8")
-    return library.public_output(meta)
+    out = library.public_output(meta)
+    if b["type"] == "ai":
+        out["ai_scenes"] = b["ai_scenes"]
+    return out
+
+
+def _prepare_ai_scenes(p: dict, scenes: list[dict], ctx: RenderContext) -> list[backgrounds.MediaItem]:
+    """Придумывает недостающие промты и рисует недостающие картинки сцен."""
+    b = p["background"]
+    missing = [i for i, sc in enumerate(scenes) if not _scene_media(sc)]
+    if missing:
+        provider = ai.get_provider()
+        if provider is None:
+            raise RenderError(ai.NO_PROVIDER)
+        if any(not scenes[i]["prompt"].strip() for i in missing):
+            ctx.progress("ИИ: придумываю кадры", 0.02)
+            prompts, warning = ai.write_prompts(provider, [sc["text"] for sc in scenes], b["ai_context"])
+            for i, sc in enumerate(scenes):
+                if not sc["prompt"].strip():
+                    sc["prompt"] = prompts[i]
+            if warning:
+                ctx.log(warning)
+        for n, i in enumerate(missing, 1):
+            ctx.check_cancel()
+            ctx.progress(f"ИИ: картинка {n} из {len(missing)}", 0.1 + 0.9 * (n - 1) / len(missing))
+            ctx.log(f"Сцена {i + 1}: {scenes[i]['prompt']}")
+            try:
+                scenes[i]["image"] = ai.generate_image(provider, scenes[i]["prompt"], b["ai_style"])["id"]
+            except ai.AIError as exc:
+                raise RenderError(str(exc)) from exc
+        ctx.progress("ИИ: готово", 1.0)
+    b["ai_scenes"] = [{k: sc[k] for k in ("text", "prompt", "image", "video", "use_video", "seconds")} for sc in scenes]
+    try:
+        return [library.media_item(_scene_media(sc)) for sc in scenes]
+    except library.LibraryError as exc:
+        raise RenderError(str(exc)) from exc

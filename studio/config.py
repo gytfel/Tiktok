@@ -76,6 +76,14 @@ DEFAULT_SETTINGS = {
     # Прокси для озвучки и Pexels, например http://127.0.0.1:8080. Пусто — без прокси
     # (переменная окружения HTTPS_PROXY тоже учитывается).
     "proxy": "",
+    # Нейросети для картинок и видео: "", "cloudflare" или "pollinations".
+    "ai_provider": "",
+    "cf_account_id": "",
+    "cf_api_token": "",
+    "cf_image_model": "flux",  # flux | sdxl
+    "pollinations_key": "",
+    "pollinations_image_model": "",  # пусто — модель сервиса по умолчанию
+    "pollinations_video_model": "",
 }
 
 _settings_lock = threading.Lock()

@@ -199,6 +199,24 @@ def plan_segments(
     return segments
 
 
+def plan_scene_segments(items: list[MediaItem], start_times: list[float], total: float) -> list[Segment]:
+    """Один файл на сцену: каждый кадр начинается вместе со своей сценой озвучки.
+    Сцены короче MIN_SEGMENT не получают отдельного кадра — остаётся предыдущий."""
+    if not items:
+        raise ValueError("Нет кадров для сцен")
+    bounds: list[tuple[float, MediaItem]] = []
+    for t, item in zip(start_times, items):
+        t = 0.0 if not bounds else max(0.0, t - 0.08)
+        if bounds and (t - bounds[-1][0] < MIN_SEGMENT or total - t < MIN_SEGMENT):
+            continue
+        bounds.append((t, item))
+    segments = []
+    for k, (t, item) in enumerate(bounds):
+        end = bounds[k + 1][0] if k + 1 < len(bounds) else total
+        segments.append(Segment(item=item, start=t, end=end, variant=k % 4))
+    return segments
+
+
 def _fit_chain(label_in: str, label_out: str, fit: str, w: int, h: int, uid: str) -> list[str]:
     """Вписывает кадр в w x h: cover — обрезка по краям, blur — целиком на размытом фоне."""
     if fit == "blur":
