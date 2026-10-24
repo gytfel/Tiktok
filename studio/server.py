@@ -8,8 +8,11 @@ import os
 import tempfile
 from pathlib import Path
 
-from fastapi import Body, FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi import Body, FastAPI, File, HTTPException, Request, UploadFile
+from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.requests import ClientDisconnect
 from fastapi.staticfiles import StaticFiles
 
 from . import __version__, ai, config, library, tts
@@ -25,6 +28,18 @@ config.ensure_dirs()
 
 app = FastAPI(title="TikTok Studio", version=__version__)
 manager = JobManager(keep_job_dirs=os.environ.get("TIKTOK_STUDIO_KEEP_JOBS") == "1")
+
+
+
+@app.exception_handler(StarletteHTTPException)
+async def http_error(request: Request, exc: StarletteHTTPException) -> JSONResponse:
+    """Вместо безликого «There was an error parsing the body» показываем настоящую причину."""
+    detail = exc.detail
+    cause = exc.__cause__
+    if exc.status_code == 400 and detail == "There was an error parsing the body" and cause is not None:
+        detail = f"Сервер не смог прочитать запрос: {type(cause).__name__}: {cause}"
+    return JSONResponse({"detail": detail}, status_code=exc.status_code, headers=getattr(exc, "headers", None))
+
 
 app.mount("/static", StaticFiles(directory=config.WEB_DIR), name="static")
 app.mount("/fonts", StaticFiles(directory=config.FONTS_DIR), name="fonts")
@@ -204,6 +219,31 @@ def upload(files: list[UploadFile] = File(...)) -> list[dict]:
     if errors and not saved:
         raise HTTPException(400, "; ".join(errors))
     return saved
+
+
+@app.post("/api/uploads/raw")
+async def upload_raw(request: Request, name: str) -> dict:
+    """Загрузка одного файла «как есть» (тело запроса — содержимое файла).
+    Пишем сразу в папку студии, без системной временной папки: на Windows её
+    иногда блокирует антивирус, и разбор multipart-формы падает."""
+    try:
+        item_id, path = library.start_upload(name)
+    except library.LibraryError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    try:
+        with open(path, "wb") as out:
+            async for chunk in request.stream():
+                out.write(chunk)
+    except ClientDisconnect:
+        path.unlink(missing_ok=True)
+        raise HTTPException(400, "Загрузка прервалась — попробуйте ещё раз")
+    except OSError as exc:
+        path.unlink(missing_ok=True)
+        raise HTTPException(500, f"Не удалось записать файл в папку студии ({path.parent}): {exc}") from exc
+    try:
+        return await run_in_threadpool(library.finish_upload, item_id, name, path)
+    except library.LibraryError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @app.delete("/api/uploads/{item_id}")

@@ -423,26 +423,46 @@ function setupMedia() {
   ["dragleave", "drop"].forEach((t) => dz.addEventListener(t, (e) => { e.preventDefault(); dz.classList.remove("drag"); }));
   dz.addEventListener("drop", (e) => handleFiles([...e.dataTransfer.files]));
 }
-function uploadFiles(files) {
+function uploadOne(file, onProgress) {
+  // Файл уходит телом запроса как есть — без multipart-формы и временных файлов на сервере.
   return new Promise((resolve, reject) => {
-    const fd = new FormData();
-    files.forEach((f) => fd.append("files", f));
     const xhr = new XMLHttpRequest();
-    const bar = $("#uploadProgress");
-    bar.hidden = false;
-    xhr.upload.onprogress = (e) => { if (e.lengthComputable) bar.firstElementChild.style.width = `${(e.loaded / e.total) * 100}%`; };
+    xhr.upload.onprogress = (e) => { if (e.lengthComputable) onProgress(e.loaded); };
     xhr.onload = () => {
-      bar.hidden = true;
-      bar.firstElementChild.style.width = "0";
       let data = null;
       try { data = JSON.parse(xhr.responseText); } catch (_) { /* пусто */ }
       if (xhr.status >= 200 && xhr.status < 300) resolve(data);
-      else reject(new Error(data?.detail || `Ошибка загрузки (${xhr.status})`));
+      else reject(new Error(`«${file.name}»: ${data?.detail || `ошибка загрузки (${xhr.status})`}`));
     };
-    xhr.onerror = () => { bar.hidden = true; reject(new Error("Сбой загрузки")); };
-    xhr.open("POST", "/api/uploads");
-    xhr.send(fd);
+    xhr.onerror = () => reject(new Error(`«${file.name}»: связь с сервером студии прервалась`));
+    xhr.open("POST", `/api/uploads/raw?name=${encodeURIComponent(file.name)}`);
+    xhr.setRequestHeader("Content-Type", "application/octet-stream");
+    xhr.send(file);
   });
+}
+async function uploadFiles(files) {
+  const bar = $("#uploadProgress");
+  const total = files.reduce((n, f) => n + f.size, 0) || 1;
+  let done = 0;
+  const saved = [];
+  const errors = [];
+  bar.hidden = false;
+  try {
+    for (const f of files) {
+      try {
+        saved.push(await uploadOne(f, (loaded) => { bar.firstElementChild.style.width = `${((done + loaded) / total) * 100}%`; }));
+      } catch (e) {
+        errors.push(e.message);
+      }
+      done += f.size;
+    }
+  } finally {
+    bar.hidden = true;
+    bar.firstElementChild.style.width = "0";
+  }
+  if (errors.length && !saved.length) throw new Error(errors.join("\n"));
+  if (errors.length) toast("Не все файлы загрузились:\n" + errors.join("\n"), "error", 12000);
+  return saved;
 }
 async function handleFiles(files) {
   if (!files.length) return;

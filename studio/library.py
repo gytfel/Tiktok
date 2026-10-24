@@ -42,15 +42,29 @@ def _check_id(item_id: str) -> str:
 
 
 def save_upload(filename: str, stream: BinaryIO, extra: dict | None = None) -> dict:
+    item_id, path = start_upload(filename)
+    try:
+        with open(path, "wb") as out:
+            shutil.copyfileobj(stream, out, length=1024 * 1024)
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
+    return finish_upload(item_id, filename, path, extra)
+
+
+def start_upload(filename: str) -> tuple[str, Path]:
+    """Проверяет формат и выдаёт id и путь, куда записать загружаемый файл."""
     config.ensure_dirs()
-    kind = kind_of(filename)
-    if not kind:
+    if not kind_of(filename):
         raise LibraryError(f"Формат файла не поддерживается: {filename}")
-    ext = Path(filename).suffix.lower()
     item_id = uuid.uuid4().hex[:12]
-    path = config.UPLOADS_DIR / f"{item_id}{ext}"
-    with open(path, "wb") as out:
-        shutil.copyfileobj(stream, out, length=1024 * 1024)
+    return item_id, config.UPLOADS_DIR / f"{item_id}{Path(filename).suffix.lower()}"
+
+
+def finish_upload(item_id: str, filename: str, path: Path, extra: dict | None = None) -> dict:
+    """Проверяет записанный файл, делает превью для видео и сохраняет описание."""
+    kind = kind_of(filename)
+    ext = path.suffix
     meta = {
         "id": item_id,
         "name": Path(filename).name[:120],
@@ -69,6 +83,8 @@ def save_upload(filename: str, stream: BinaryIO, extra: dict | None = None) -> d
         meta.update({k: info[k] for k in ("duration", "width", "height")})
         if kind in ("image", "video") and not info["has_video"]:
             raise LibraryError("Файл повреждён или не распознан")
+        if kind == "audio" and not info["has_audio"]:
+            raise LibraryError("В файле не найден звук — возможно, он повреждён")
         if kind == "video":
             thumb = config.UPLOADS_DIR / f"{item_id}.thumb.jpg"
             seek = min(1.0, (info["duration"] or 0) / 3)
