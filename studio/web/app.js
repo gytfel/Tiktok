@@ -1095,7 +1095,8 @@ async function refreshTunnel() {
     box.innerHTML = `<p>Скачиваю cloudflared… ${t.progress}%</p><div class="progress"><div style="width:${t.progress}%"></div></div>
       <button class="link-btn danger" data-tunnel="stop">Отменить</button>`;
   } else if (t.state === "starting" || (t.state === "running" && !t.url)) {
-    box.innerHTML = `<p>Подключаюсь к Cloudflare… обычно это 5–15 секунд.</p>
+    const how = t.attempt > 1 ? ` Первый способ не сработал — пробую другой (${t.attempt} из ${t.attempts}: ${esc(t.method)}).` : "";
+    box.innerHTML = `<p>Подключаюсь к Cloudflare… обычно это 5–15 секунд.${how}</p>
       <button class="link-btn danger" data-tunnel="stop">Отменить</button>`;
   } else if (t.state === "running") {
     box.innerHTML = `<div class="phone-qr">${t.qr ? `<div class="qr">${t.qr}</div>` : ""}

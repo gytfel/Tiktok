@@ -78,6 +78,59 @@ def test_tunnel_failure_shows_cloudflared_log(workspace):
     assert "i/o timeout" in t.error and t.url == ""
 
 
+FAKE_ONLY_QUIC = """#!{python}
+import sys, time
+print("INF Requesting new quick Tunnel on trycloudflare.com...", flush=True)
+print("INF |  https://quic-only-words.trycloudflare.com  |", flush=True)
+if "quic" not in sys.argv:
+    print('ERR initial tunnel connection failed error="control stream error: context deadline exceeded"', flush=True)
+    raise SystemExit(1)
+print("INF Registered tunnel connection connIndex=0 protocol=quic", flush=True)
+time.sleep(60)
+"""
+
+FAKE_HANG_THEN_OK = """#!{python}
+import sys, time
+print("INF |  https://slow-then-ok.trycloudflare.com  |", flush=True)
+if "http2" in sys.argv and "us" not in sys.argv:
+    time.sleep(60)  # TCP повис без подключения
+print("INF Registered tunnel connection connIndex=0", flush=True)
+time.sleep(60)
+"""
+
+
+@pytest.mark.skipif(os.name == "nt", reason="имитация cloudflared — shell-скрипт")
+def test_tunnel_falls_back_to_next_protocol(workspace):
+    install_fake(FAKE_ONLY_QUIC)
+    t = tunnel_mod.Tunnel()
+    t.start(8765)
+    wait_for(t, {"running", "error"})
+    assert t.state == "running" and t.attempt == 2 and t.method == "QUIC"
+    assert t.url == "https://quic-only-words.trycloudflare.com"
+    t.stop()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="имитация cloudflared — shell-скрипт")
+def test_tunnel_gives_up_on_hanging_attempt(workspace, monkeypatch):
+    monkeypatch.setattr(tunnel_mod, "START_TIMEOUT", 0.5)
+    install_fake(FAKE_HANG_THEN_OK)
+    t = tunnel_mod.Tunnel()
+    t.start(8765)
+    wait_for(t, {"running", "error"})
+    assert t.state == "running" and t.attempt == 2
+    t.stop()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="имитация cloudflared — shell-скрипт")
+def test_tunnel_all_attempts_fail(workspace):
+    install_fake(FAKE_FAIL)
+    t = tunnel_mod.Tunnel()
+    t.start(8765)
+    wait_for(t, {"error"})
+    assert "ни одним из способов" in t.error and "VPN" in t.error
+    assert sum(1 for line in t.log if line.startswith("--- способ")) == len(tunnel_mod.ATTEMPTS)
+
+
 def test_download_extracts_macos_archive(workspace, monkeypatch):
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
