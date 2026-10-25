@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# Управление TikTok Studio на сервере. Справка: sudo tiktok-studio help
+set -euo pipefail
+
+APP_DIR=/opt/tiktok-studio/app
+VENV=/opt/tiktok-studio/venv
+DATA_DIR="${TS_DATA_DIR:-/var/lib/tiktok-studio}"
+SERVICE_USER=tiktokstudio
+INSTALLER="https://raw.githubusercontent.com/${TS_REPO:-gytfel/Tiktok}/${TS_BRANCH:-main}/deploy/install.sh"
+
+die() { printf 'Ошибка: %s\n' "$*" >&2; exit 1; }
+need_root() { [ "$(id -u)" -eq 0 ] || die "нужны права администратора: sudo tiktok-studio $*"; }
+
+py() {
+  (cd "$APP_DIR" && umask 077 && runuser -u "$SERVICE_USER" -- env HOME="$DATA_DIR" TIKTOK_STUDIO_WORKSPACE="$DATA_DIR" "$VENV/bin/python" "$@")
+}
+
+info() {
+  local url key
+  url="$(sed -n 's/^STUDIO_URL=//p' "$DATA_DIR/server.env" 2>/dev/null | head -1)"
+  key="$(py -c 'from studio import phone; print(phone.access_key())')"
+  [ -n "$url" ] || die "студия не установлена (нет $DATA_DIR/server.env)"
+  printf '\n\033[1;32mTikTok Studio работает.\033[0m\n\n'
+  printf '  Ссылка для телефона:  %s/?key=%s\n' "$url" "$key"
+  printf '  Адрес:                %s\n' "$url"
+  printf '  Код доступа:          %s\n\n' "$key"
+  printf 'Отсканируйте QR-код камерой телефона:\n\n'
+  py -c "import segno, sys; segno.make(sys.argv[1], error='m').terminal(compact=True)" "$url/?key=$key" || true
+  cat <<'EOF'
+
+Команды:
+  sudo tiktok-studio info      показать ссылку, код и QR-код
+  sudo tiktok-studio update    обновить студию (видео и настройки сохранятся)
+  sudo tiktok-studio restart   перезапустить
+  sudo tiktok-studio logs      журнал работы
+  sudo tiktok-studio new-key   сменить код доступа (все телефоны войдут заново)
+EOF
+}
+
+cmd="${1:-help}"
+case "$cmd" in
+  info) need_root "$cmd"; info ;;
+  update) need_root "$cmd"; curl -fsSL "$INSTALLER" | bash ;;
+  restart) need_root "$cmd"; systemctl restart tiktok-studio; systemctl restart caddy 2>/dev/null || true; echo "Перезапущено." ;;
+  logs) need_root "$cmd"; journalctl -u tiktok-studio -n "${2:-100}" --no-pager ;;
+  status) need_root "$cmd"; systemctl --no-pager status tiktok-studio caddy | head -40 ;;
+  new-key)
+    need_root "$cmd"
+    py -c "from studio import config, phone; config.save_settings({'phone_key': ''}); phone.access_key()"
+    systemctl restart tiktok-studio
+    info ;;
+  help|-h|--help)
+    cat <<'EOF'
+Команды:
+  sudo tiktok-studio info      показать ссылку, код и QR-код
+  sudo tiktok-studio update    обновить студию (видео и настройки сохранятся)
+  sudo tiktok-studio restart   перезапустить
+  sudo tiktok-studio logs      журнал работы (logs 300 — последние 300 строк)
+  sudo tiktok-studio status    состояние служб
+  sudo tiktok-studio new-key   сменить код доступа (все телефоны войдут заново)
+EOF
+    ;;
+  *) die "неизвестная команда «$cmd». Справка: sudo tiktok-studio help" ;;
+esac

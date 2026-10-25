@@ -1,4 +1,4 @@
-"""Запуск TikTok Studio: python run.py [--port 8765] [--no-browser] [--phone]"""
+"""Запуск TikTok Studio: python run.py [--port 8765] [--no-browser] [--phone] [--server]"""
 
 from __future__ import annotations
 
@@ -15,7 +15,11 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--no-browser", action="store_true", help="не открывать браузер автоматически")
     parser.add_argument("--phone", action="store_true", help="разрешить вход с телефона по домашней сети (с кодом доступа)")
+    parser.add_argument("--server", action="store_true", help="режим сервера (за Caddy): код доступа нужен для любого запроса")
     args = parser.parse_args()
+    if args.server:
+        os.environ["TIKTOK_STUDIO_SERVER"] = "1"
+        args.no_browser = True
     host = args.host or ("0.0.0.0" if args.phone else "127.0.0.1")
     os.environ["TIKTOK_STUDIO_PORT"] = str(args.port)
     if args.phone:
@@ -37,6 +41,11 @@ def main() -> None:
 
     url = f"http://{'127.0.0.1' if host in ('0.0.0.0', '::') else host}:{args.port}"
     print(f"TikTok Studio запущена: {url}  (остановить — Ctrl+C)")
+    if args.server:
+        from studio import phone
+
+        phone.access_key()  # код создаётся при первом запуске и хранится в settings.json
+        print("Режим сервера: вход только по коду доступа. Ссылка и код: sudo tiktok-studio info")
     if args.phone:
         from studio import phone
 

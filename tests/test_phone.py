@@ -69,3 +69,31 @@ def test_manifest_is_served(app):
 
 def test_lan_addresses_skip_loopback():
     assert all(not ip.startswith("127.") for ip in phone.lan_addresses())
+
+
+def test_server_mode_requires_key_even_from_localhost(app, monkeypatch):
+    # На VPS запросы приходят от Caddy с 127.0.0.1 — без кода пускать нельзя.
+    monkeypatch.setenv(phone.ENV_SERVER, "1")
+    monkeypatch.delenv(phone.ENV_FLAG, raising=False)
+    key = phone.access_key()
+    c = client(app, LOCAL_IP)
+    page = c.get("/")
+    assert page.status_code == 401 and "tiktok-studio info" in page.text
+    assert c.get("/api/status").status_code == 401
+
+    login = c.get("/", params={"key": key})
+    assert login.status_code == 303 and phone.COOKIE in login.headers["set-cookie"]
+    assert c.get("/api/status").json()["server"] is True
+    info = c.get("/api/phone").json()
+    assert info["remote"] is True and info["key"] == ""  # код через веб не раскрывается
+    assert c.post("/api/tunnel/start").status_code == 403  # туннель на сервере не нужен
+
+
+def test_server_mode_accepts_proxied_requests_with_key(app, monkeypatch):
+    monkeypatch.setenv(phone.ENV_SERVER, "1")
+    key = phone.access_key()
+    c = client(app, LOCAL_IP)
+    headers = {"X-Forwarded-For": "203.0.113.9"}  # так приходят запросы через Caddy
+    assert c.get("/api/status", headers=headers).status_code == 401
+    login = c.get("/", params={"key": key}, headers=headers)
+    assert login.status_code == 303 and "secure" in login.headers["set-cookie"].lower()

@@ -78,6 +78,7 @@ def status() -> dict:
         "defaults": DEFAULT_PROJECT,
         "settings": _public_settings(),
         "ai_styles": {k: v["label"] for k, v in ai.STYLES.items()},
+        "server": phone.server_mode(),
         "offline_tts": importlib.util.find_spec("pyttsx3") is not None,
     }
 
@@ -121,7 +122,9 @@ def update_settings(values: dict = Body(...)) -> dict:
 
 
 def _is_local_request(request: Request) -> bool:
-    """Запрос с этого компьютера (а не с телефона через сеть или туннель)."""
+    """Запрос с этого компьютера (а не с телефона через сеть или туннель). На сервере «своих» нет."""
+    if phone.server_mode():
+        return False
     return phone.is_local(request.client.host if request.client else "") and not phone.is_proxied(request.scope)
 
 

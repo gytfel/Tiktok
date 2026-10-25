@@ -23,6 +23,7 @@ from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, R
 from . import config
 
 ENV_FLAG = "TIKTOK_STUDIO_PHONE"
+ENV_SERVER = "TIKTOK_STUDIO_SERVER"  # студия на сервере: код нужен для любого запроса
 ENV_PORT = "TIKTOK_STUDIO_PORT"
 COOKIE = "studio_key"
 ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # без похожих 0/O и 1/I
@@ -39,6 +40,10 @@ failures: deque[float] = deque()
 
 def enabled() -> bool:
     return os.environ.get(ENV_FLAG) == "1"
+
+
+def server_mode() -> bool:
+    return os.environ.get(ENV_SERVER) == "1"
 
 
 def port() -> int:
@@ -120,6 +125,10 @@ def qr_svg(text: str) -> str | None:
 
 
 def login_page(wrong: bool) -> str:
+    if server_mode():
+        where = "Откройте ссылку с кодом доступа или введите код. Узнать его: <code>sudo tiktok-studio info</code> на сервере."
+    else:
+        where = "Отсканируйте QR-код в студии на компьютере (кнопка «📱 Телефон») или введите код доступа оттуда же."
     error = '<p class="err">Неверный код — проверьте и попробуйте ещё раз.</p>' if wrong else ""
     return f"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>TikTok Studio — вход</title>
@@ -127,19 +136,20 @@ def login_page(wrong: bool) -> str:
 body{{margin:0;min-height:100vh;display:grid;place-items:center;background:#0b0b10;color:#ececf3;
 font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;padding:16px;box-sizing:border-box}}
 .card{{background:#14141c;border:1px solid #2a2a38;border-radius:16px;padding:24px;max-width:360px;width:100%}}
-h1{{font-size:20px;margin:0 0 8px}} p{{color:#9a9aae;margin:0 0 16px}} .err{{color:#ff8da1}}
+h1{{font-size:20px;margin:0 0 8px}} p{{color:#9a9aae;margin:0 0 16px}} .err{{color:#ff8da1}} code{{color:#ececf3}}
 input{{width:100%;box-sizing:border-box;font-size:22px;letter-spacing:4px;text-transform:uppercase;text-align:center;
 padding:12px;border-radius:10px;border:1px solid #2a2a38;background:#1b1b26;color:#fff;margin-bottom:12px}}
 button{{width:100%;padding:13px;border:0;border-radius:10px;font-size:16px;font-weight:600;color:#fff;
 background:linear-gradient(135deg,#fe2c55,#ff8a3d)}}
 </style></head><body><form class="card" method="get" action="/">
-<h1>TikTok Studio</h1><p>Отсканируйте QR-код в студии на компьютере (кнопка «📱 Телефон») или введите код доступа оттуда же.</p>
+<h1>TikTok Studio</h1><p>{where}</p>
 {error}<input name="key" autocomplete="one-time-code" autocapitalize="characters" maxlength="12" placeholder="КОД" required autofocus>
 <button type="submit">Войти</button></form></body></html>"""
 
 
 class PhoneGuard:
-    """ASGI-прослойка: с этого компьютера — без ограничений, из сети — только с кодом."""
+    """ASGI-прослойка: с этого компьютера — без ограничений, из сети — только с кодом.
+    В режиме сервера код нужен всем: запросы приходят от Caddy с 127.0.0.1."""
 
     def __init__(self, app):
         self.app = app
@@ -151,9 +161,10 @@ class PhoneGuard:
 
         client = scope.get("client") or ("", 0)
         proxied = is_proxied(scope)
-        if is_local(client[0]) and not proxied:
+        server = server_mode()
+        if is_local(client[0]) and not proxied and not server:
             return await self.app(scope, receive, send)
-        if (proxied and not tunnel.active()) or (not proxied and not enabled()):
+        if not server and ((proxied and not tunnel.active()) or (not proxied and not enabled())):
             response = PlainTextResponse(
                 "Доступ к студии с других устройств выключен. Включите его в студии на компьютере (кнопка 📱).",
                 status_code=403,
@@ -180,7 +191,8 @@ class PhoneGuard:
             failures.append(now)
             await asyncio.sleep(FAIL_DELAY)
         if (scope.get("path") or "").startswith("/api/"):
-            response = JSONResponse({"detail": "Нужен код доступа — откройте студию по QR-коду с компьютера"}, status_code=401)
+            hint = "sudo tiktok-studio info на сервере" if server else "QR-код в студии на компьютере"
+            response = JSONResponse({"detail": f"Нужен код доступа — откройте ссылку с кодом ({hint})"}, status_code=401)
         else:
             response = HTMLResponse(login_page(wrong=bool(from_query)), status_code=401)
         await response(scope, receive, send)
