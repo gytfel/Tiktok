@@ -13,6 +13,8 @@ import ipaddress
 import os
 import secrets
 import socket
+import time
+from collections import deque
 from urllib.parse import urlencode
 
 from starlette.requests import Request
@@ -26,6 +28,13 @@ COOKIE = "studio_key"
 ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # без похожих 0/O и 1/I
 KEY_LENGTH = 8
 FAIL_DELAY = 1.0  # пауза после неверного кода — против подбора
+FAIL_LIMIT = 30  # неверных кодов за FAIL_WINDOW секунд — и вход временно закрывается
+FAIL_WINDOW = 600
+# Заголовки, которые добавляет туннель Cloudflare: такой запрос пришёл из интернета,
+# хотя сокет у него локальный (127.0.0.1).
+PROXY_HEADERS = (b"cf-connecting-ip", b"cf-ray", b"x-forwarded-for")
+# Время неверных попыток входа (общее для всех клиентов).
+failures: deque[float] = deque()
 
 
 def enabled() -> bool:
@@ -92,6 +101,10 @@ def lan_addresses() -> list[str]:
     return sorted(addrs, key=rank)
 
 
+def is_proxied(scope) -> bool:
+    return any(name in PROXY_HEADERS for name, _ in scope.get("headers") or [])
+
+
 def phone_urls() -> list[str]:
     query = urlencode({"key": access_key()})
     return [f"http://{ip}:{port()}/?{query}" for ip in lan_addresses()]
@@ -134,12 +147,16 @@ class PhoneGuard:
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
             return await self.app(scope, receive, send)
+        from .tunnel import tunnel
+
         client = scope.get("client") or ("", 0)
-        if is_local(client[0]):
+        proxied = is_proxied(scope)
+        if is_local(client[0]) and not proxied:
             return await self.app(scope, receive, send)
-        if not enabled():
+        if (proxied and not tunnel.active()) or (not proxied and not enabled()):
             response = PlainTextResponse(
-                "Доступ к студии из сети выключен. Запустите её через start-phone.bat.", status_code=403
+                "Доступ к студии с других устройств выключен. Включите его в студии на компьютере (кнопка 📱).",
+                status_code=403,
             )
             return await response(scope, receive, send)
 
@@ -148,12 +165,19 @@ class PhoneGuard:
         from_query = request.query_params.get("key", "")
         if key_matches(request.cookies.get(COOKIE, ""), key):
             return await self.app(scope, receive, send)
+        now = time.monotonic()
+        while failures and now - failures[0] > FAIL_WINDOW:
+            failures.popleft()
+        if from_query and len(failures) >= FAIL_LIMIT:
+            response = PlainTextResponse("Слишком много неверных кодов. Подождите 10 минут.", status_code=429)
+            return await response(scope, receive, send)
         if key_matches(from_query, key):
             # Запоминаем код в cookie и убираем его из адреса.
             response = RedirectResponse(scope.get("path") or "/", status_code=303)
-            response.set_cookie(COOKIE, key, max_age=365 * 24 * 3600, httponly=True, samesite="lax")
+            response.set_cookie(COOKIE, key, max_age=365 * 24 * 3600, httponly=True, samesite="lax", secure=proxied)
             return await response(scope, receive, send)
         if from_query:
+            failures.append(now)
             await asyncio.sleep(FAIL_DELAY)
         if (scope.get("path") or "").startswith("/api/"):
             response = JSONResponse({"detail": "Нужен код доступа — откройте студию по QR-коду с компьютера"}, status_code=401)

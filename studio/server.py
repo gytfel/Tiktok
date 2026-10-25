@@ -7,6 +7,8 @@ import importlib.util
 import mimetypes
 import os
 import tempfile
+import threading
+import uuid
 from pathlib import Path
 
 from fastapi import Body, FastAPI, File, HTTPException, Request, UploadFile
@@ -17,6 +19,7 @@ from starlette.requests import ClientDisconnect
 from fastapi.staticfiles import StaticFiles
 
 from . import __version__, ai, config, library, phone, tts
+from .tunnel import tunnel
 from .backgrounds import GRADIENT_PRESETS
 from .ffmpeg_utils import capabilities
 from .text_utils import clean_text
@@ -117,16 +120,52 @@ def update_settings(values: dict = Body(...)) -> dict:
     return _public_settings()
 
 
+def _is_local_request(request: Request) -> bool:
+    """Запрос с этого компьютера (а не с телефона через сеть или туннель)."""
+    return phone.is_local(request.client.host if request.client else "") and not phone.is_proxied(request.scope)
+
+
+def _require_local(request: Request) -> None:
+    if not _is_local_request(request):
+        raise HTTPException(403, "Это можно сделать только на компьютере, где запущена студия")
+
+
 @app.get("/api/phone")
 def phone_access(request: Request) -> dict:
     """Ссылка и QR-код для телефона. Код доступа видно только на этом компьютере."""
-    local = phone.is_local(request.client.host if request.client else "")
+    local = _is_local_request(request)
     data = {"enabled": phone.enabled(), "remote": not local, "urls": [], "key": "", "qr": None}
     if phone.enabled() and local:
         data["urls"] = phone.phone_urls()
         data["key"] = phone.access_key()
         data["qr"] = phone.qr_svg(data["urls"][0]) if data["urls"] else None
     return data
+
+
+@app.get("/api/tunnel")
+def tunnel_status(request: Request) -> dict:
+    data = tunnel.status()
+    data["url"] = data["url"] if tunnel.state == "running" or _is_local_request(request) else ""
+    if _is_local_request(request) and data["url"]:
+        data["phone_url"] = f"{data['url']}/?key={phone.access_key()}"
+        data["key"] = phone.access_key()
+        data["qr"] = phone.qr_svg(data["phone_url"])
+    return data
+
+
+@app.post("/api/tunnel/start")
+def tunnel_start(request: Request) -> dict:
+    _require_local(request)
+    phone.access_key()  # код создаётся заранее
+    tunnel.start(phone.port())
+    return tunnel.status()
+
+
+@app.post("/api/tunnel/stop")
+def tunnel_stop(request: Request) -> dict:
+    _require_local(request)
+    tunnel.stop()
+    return tunnel.status()
 
 
 # ------------------------------------------------------------- голоса
@@ -202,6 +241,11 @@ def ai_image(payload: dict = Body(...)) -> dict:
         raise HTTPException(502, str(exc)) from exc
 
 
+# ИИ-видео делается минутами: запрос сразу возвращает номер задачи, а страница
+# спрашивает о результате. Иначе через туннель (лимит ответа ~100 с) он бы обрывался.
+_ai_tasks: dict[str, dict] = {}
+
+
 @app.post("/api/ai/video")
 def ai_video(payload: dict = Body(...)) -> dict:
     provider = _provider()
@@ -212,10 +256,28 @@ def ai_video(payload: dict = Body(...)) -> dict:
         seconds = float(payload.get("seconds") or 4)
     except (TypeError, ValueError):
         seconds = 4.0
-    try:
-        return ai.generate_video(provider, str(payload.get("prompt") or "")[:1500], style, seconds)
-    except ai.AIError as exc:
-        raise HTTPException(502, str(exc)) from exc
+    prompt = str(payload.get("prompt") or "")[:1500]
+    task_id = uuid.uuid4().hex[:12]
+    task = _ai_tasks[task_id] = {"id": task_id, "status": "running", "stage": "", "result": None, "error": None}
+
+    def work() -> None:
+        try:
+            task["result"] = ai.generate_video(provider, prompt, style, seconds, on_wait=lambda m: task.update(stage=m))
+            task["status"] = "done"
+        except Exception as exc:  # показываем пользователю любую причину
+            task["error"] = str(exc) if isinstance(exc, ai.AIError) else f"{type(exc).__name__}: {exc}"
+            task["status"] = "error"
+
+    threading.Thread(target=work, daemon=True, name=f"ai-video-{task_id}").start()
+    return task
+
+
+@app.get("/api/ai/tasks/{task_id}")
+def ai_task(task_id: str) -> dict:
+    task = _ai_tasks.get(task_id)
+    if not task:
+        raise HTTPException(404, "Задача не найдена — возможно, студию перезапускали")
+    return task
 
 
 # ------------------------------------------------------------- файлы

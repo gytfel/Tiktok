@@ -16,6 +16,7 @@ const state = {
   pollTimer: null,
   previewWord: 0,
   aiBusy: {}, // номер сцены -> текст состояния, пока идёт генерация
+  tunnelTimer: null,
 };
 
 const SAMPLE_TEXT = `Знаете, почему осьминогов считают одними из самых умных существ на планете?
@@ -444,8 +445,12 @@ function setupMedia() {
   ["dragleave", "drop"].forEach((t) => dz.addEventListener(t, (e) => { e.preventDefault(); dz.classList.remove("drag"); }));
   dz.addEventListener("drop", (e) => handleFiles([...e.dataTransfer.files]));
 }
+const TUNNEL_UPLOAD_LIMIT = 95 * 1024 * 1024; // Cloudflare не пропускает загрузки больше 100 МБ
 function uploadOne(file, onProgress) {
   // Файл уходит телом запроса как есть — без multipart-формы и временных файлов на сервере.
+  if (location.hostname.endsWith(".trycloudflare.com") && file.size > TUNNEL_UPLOAD_LIMIT) {
+    return Promise.reject(new Error(`«${file.name}»: через интернет можно загрузить файл до 100 МБ, а этот — ${Math.round(file.size / 1048576)} МБ. Обрежьте видео или загрузите его на компьютере.`));
+  }
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.upload.onprogress = (e) => { if (e.lengthComputable) onProgress(e.loaded); };
@@ -610,7 +615,7 @@ async function aiGenerate(i, kind) {
   try {
     const style = state.project.background.ai_style;
     const meta = kind === "video"
-      ? await api("/api/ai/video", { method: "POST", body: { prompt: sc.prompt, style, seconds: sc.seconds || 4 } })
+      ? await waitAiTask(await api("/api/ai/video", { method: "POST", body: { prompt: sc.prompt, style, seconds: sc.seconds || 4 } }), i)
       : await api("/api/ai/image", { method: "POST", body: { prompt: sc.prompt, style } });
     if (kind === "video") {
       sc.video = meta.id;
@@ -627,6 +632,19 @@ async function aiGenerate(i, kind) {
     renderScenes();
     throw e;
   }
+}
+async function waitAiTask(task, i) {
+  // Видео делается минутами — спрашиваем сервер, пока не будет готово.
+  while (task.status === "running") {
+    await new Promise((r) => setTimeout(r, 3000));
+    task = await api(`/api/ai/tasks/${task.id}`);
+    if (task.stage) {
+      state.aiBusy[i] = `Делаю видео (${task.stage})…`;
+      renderScenes();
+    }
+  }
+  if (task.status === "error") throw new Error(task.error || "Не удалось сделать видео");
+  return task.result;
 }
 async function aiDrawAll() {
   const btn = $("#aiDrawBtn");
@@ -1038,46 +1056,80 @@ function setupSettings() {
 // ------------------------------------------------------------------ телефон
 
 async function openPhone() {
-  const body = $("#phoneBody");
-  body.innerHTML = '<p class="hint">Загрузка…</p>';
   $("#phoneDialog").showModal();
+  $("#phoneBody").innerHTML = `
+    <h3 class="sub-head">Через интернет — с мобильной сети или любого Wi-Fi</h3>
+    <div id="tunnelBox"><p class="hint">Загрузка…</p></div>
+    <h3 class="sub-head">Через домашний Wi-Fi</h3>
+    <div id="lanBox"><p class="hint">Загрузка…</p></div>`;
+  renderLan();
+  refreshTunnel();
+}
+async function renderLan() {
+  const box = $("#lanBox");
   let data;
-  try { data = await api("/api/phone"); } catch (e) { body.textContent = e.message; return; }
+  try { data = await api("/api/phone"); } catch (e) { box.textContent = e.message; return; }
   if (!data.enabled) {
-    body.innerHTML = `<p>Сейчас студия открыта только на этом компьютере.</p>
-      <ol class="phone-steps">
-        <li>Закройте окно студии (чёрное окно с текстом).</li>
-        <li>Запустите <b>start-phone.bat</b> из папки студии (на Mac/Linux: <code>./start.sh --phone</code>).</li>
-        <li>Снова нажмите эту кнопку — появится QR-код для телефона.</li>
-      </ol>`;
+    box.innerHTML = `<p class="hint">Если телефон в той же сети Wi-Fi, можно обойтись без интернета: закройте окно студии и запустите <b>start-phone.bat</b> (на Mac/Linux: <code>./start.sh --phone</code>).</p>`;
     return;
   }
   if (!data.urls.length) {
-    body.innerHTML = `<p>Не удалось найти адрес компьютера в сети. Проверьте, что компьютер подключён к Wi-Fi или роутеру кабелем, и перезапустите студию.</p>`;
+    box.innerHTML = `<p class="hint">Не удалось найти адрес компьютера в сети — проверьте подключение к Wi-Fi.</p>`;
     return;
   }
-  body.innerHTML = `<div class="phone-qr">
-      ${data.qr ? `<div class="qr">${data.qr}</div>` : ""}
-      <div><div class="hint">Код доступа</div><div class="code">${esc(data.key)}</div></div>
-    </div>
-    <ol class="phone-steps">
-      <li>Подключите телефон к <b>тому же Wi-Fi</b>, что и компьютер.</li>
-      <li>Наведите камеру телефона на QR-код и откройте ссылку. Или наберите адрес в браузере телефона:</li>
-    </ol>
+  box.innerHTML = `<div class="phone-qr">${data.qr ? `<div class="qr">${data.qr}</div>` : ""}
+      <div><div class="hint">Код доступа</div><div class="code">${esc(data.key)}</div></div></div>
     ${data.urls.map((u) => `<div class="phone-url">${esc(u)}</div>`).join("")}
-    <ol class="phone-steps" start="3">
-      <li>Чтобы студия была под рукой, добавьте её на главный экран: в Safari — «Поделиться → На экран Домой», в Chrome — «⋮ → Добавить на главный экран».</li>
-      <li>Компьютер со студией должен оставаться включённым: видео собирается на нём, телефон — пульт.</li>
-    </ol>
-    <p class="hint">Не открывается? Windows могла заблокировать доступ: при запуске разрешите доступ для «Частных сетей», а сеть Wi-Fi в параметрах Windows должна быть «Частной».</p>`;
+    <p class="hint">Телефон должен быть в той же сети Wi-Fi. Не открывается? Разрешите доступ в брандмауэре Windows для «Частных сетей» и сделайте сеть Wi-Fi «Частной».</p>`;
+}
+async function refreshTunnel() {
+  clearTimeout(state.tunnelTimer);
+  const box = $("#tunnelBox");
+  if (!box || !$("#phoneDialog").open) return;
+  let t;
+  try { t = await api("/api/tunnel"); } catch (e) { box.textContent = e.message; return; }
+  if (t.state === "off") {
+    box.innerHTML = `<p class="hint">Студия получит временную защищённую ссылку через бесплатный сервис Cloudflare — её можно открыть с телефона где угодно. Компьютер со студией при этом должен быть включён. В первый раз скачается программа cloudflared (~40 МБ).</p>
+      <button class="btn primary" data-tunnel="start">Включить доступ из интернета</button>`;
+  } else if (t.state === "downloading") {
+    box.innerHTML = `<p>Скачиваю cloudflared… ${t.progress}%</p><div class="progress"><div style="width:${t.progress}%"></div></div>
+      <button class="link-btn danger" data-tunnel="stop">Отменить</button>`;
+  } else if (t.state === "starting" || (t.state === "running" && !t.url)) {
+    box.innerHTML = `<p>Подключаюсь к Cloudflare… обычно это 5–15 секунд.</p>
+      <button class="link-btn danger" data-tunnel="stop">Отменить</button>`;
+  } else if (t.state === "running") {
+    box.innerHTML = `<div class="phone-qr">${t.qr ? `<div class="qr">${t.qr}</div>` : ""}
+        <div><div class="hint">Код доступа</div><div class="code">${esc(t.key || "")}</div></div></div>
+      <div class="phone-url">${esc(t.phone_url || t.url)}</div>
+      <ol class="phone-steps">
+        <li>Наведите камеру телефона на QR-код и откройте ссылку — подойдёт любой интернет, хоть мобильный.</li>
+        <li>Если страница не открылась сразу — подождите 10–20 секунд и обновите её.</li>
+        <li>Ссылка действует, пока студия запущена и доступ включён. После перезапуска будет новая ссылка — отсканируйте QR заново.</li>
+      </ol>
+      <button class="btn secondary" data-tunnel="stop">Выключить доступ из интернета</button>`;
+  } else {
+    box.innerHTML = `<p class="job-error">${esc(t.error || "Не удалось включить доступ")}</p>
+      <p class="hint">Если мобильный интернет или провайдер блокирует Cloudflare, попробуйте позже, через VPN или с помощью Tailscale (см. README).</p>
+      <button class="btn primary" data-tunnel="start">Попробовать снова</button>`;
+  }
+  if (["downloading", "starting"].includes(t.state) || (t.state === "running" && !t.url)) {
+    state.tunnelTimer = setTimeout(refreshTunnel, 1000);
+  }
 }
 async function setupPhone() {
   $("#phoneBtn").addEventListener("click", openPhone);
+  $("#phoneBody").addEventListener("click", async (e) => {
+    const act = e.target.closest("[data-tunnel]")?.dataset.tunnel;
+    if (!act) return;
+    e.target.disabled = true;
+    try { await api(`/api/tunnel/${act}`, { method: "POST" }); } catch (err) { toast(err.message, "error"); }
+    refreshTunnel();
+  });
   $("#phoneClose").addEventListener("click", () => $("#phoneDialog").close());
   try {
     const data = await api("/api/phone");
     if (data.remote) $("#phoneBtn").hidden = true; // уже открыто с телефона
-    else if (data.enabled && location.hash === "#phone") openPhone();
+    else if (location.hash === "#phone") openPhone();
   } catch (_) { /* не критично */ }
 }
 

@@ -16,6 +16,7 @@ def app(tmp_path, monkeypatch):
         monkeypatch.setattr(config, name, tmp_path / name.lower())
     monkeypatch.setattr(config, "SETTINGS_FILE", tmp_path / "settings.json")
     monkeypatch.setattr(phone, "FAIL_DELAY", 0)
+    phone.failures.clear()
     monkeypatch.setattr(phone, "lan_addresses", lambda: ["192.168.1.10"])
     config.ensure_dirs()
     from studio.server import app
