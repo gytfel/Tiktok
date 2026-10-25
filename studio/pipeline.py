@@ -73,6 +73,9 @@ def check_sources(p: dict) -> Sources:
     """Проверяет настройки фона и музыки сразу, чтобы не ждать озвучку ради ошибки в них."""
     b = p["background"]
     src = Sources()
+    problem = tts.voice_language_problem(clean_text(p["text"]), p["voice"]["voice"])
+    if problem:
+        raise RenderError(problem)
     if b["type"] == "media":
         if not b["media"]:
             raise RenderError(

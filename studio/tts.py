@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import subprocess
 import sys
 import time
@@ -65,7 +66,62 @@ def _fmt_pitch(hz: int) -> str:
 # ---------------------------------------------------------------- Edge TTS
 
 
-async def _edge_synthesize(text: str, voice: str, rate: int, pitch: int, volume: int, out_path: Path) -> list[Boundary]:
+# edge-tts всегда отдаёт MP3 24 кГц 48 кбит/с CBR: длительность считается по размеру.
+MP3_BYTES_PER_SECOND = 48_000 / 8
+CHUNK_CHARS = 600
+# Языки голосов, которые читают кириллицу. Остальным (кроме Multilingual) русский
+# текст не по силам — сервис в ответ молча не присылает звук.
+CYRILLIC_LANGS = {"ru", "uk", "be", "bg", "sr", "mk", "kk", "ky", "mn", "tg", "tt", "ba"}
+
+
+def voice_language_problem(text: str, voice: str) -> str | None:
+    """Сообщение, если выбранный голос не сможет прочитать текст на этом языке."""
+    if not voice or voice.startswith("system:") or "multilingual" in voice.lower():
+        return None
+    letters = [c for c in text if c.isalpha()]
+    if not letters:
+        return None
+    cyrillic = sum(1 for c in letters if "\u0400" <= c <= "\u04ff")
+    lang = voice.split("-")[0].lower()
+    if cyrillic / len(letters) > 0.3 and lang not in CYRILLIC_LANGS:
+        return (
+            f"Голос «{voice}» не умеет читать русский текст — Microsoft в таком случае не присылает звук. "
+            "На вкладке «Голос» выберите русский голос или голос с пометкой Multilingual."
+        )
+    return None
+
+
+def split_for_tts(text: str, max_chars: int = CHUNK_CHARS) -> list[str]:
+    """Делит текст на части до max_chars символов по абзацам и предложениям.
+    Короткие абзацы объединяются, части без слов отбрасываются."""
+    pieces: list[str] = []
+    for para in text.split("\n\n"):
+        para = " ".join(para.split())
+        if len(para) <= max_chars:
+            pieces.append(para)
+            continue
+        for sentence in re.split(r"(?<=[.!?…])\s+", para):
+            while len(sentence) > max_chars:
+                cut = sentence.rfind(", ", 0, max_chars) + 1
+                if cut < max_chars // 2:
+                    cut = sentence.rfind(" ", 0, max_chars)
+                if cut <= 0:
+                    cut = max_chars
+                pieces.append(sentence[:cut].strip())
+                sentence = sentence[cut:].strip()
+            pieces.append(sentence)
+    chunks: list[str] = []
+    for piece in pieces:
+        if not re.search(r"\w", piece):
+            continue
+        if chunks and len(chunks[-1]) + 1 + len(piece) <= max_chars:
+            chunks[-1] = f"{chunks[-1]}\n{piece}"
+        else:
+            chunks.append(piece)
+    return chunks
+
+
+async def _edge_stream(text: str, voice: str, rate: int, pitch: int, volume: int) -> tuple[bytes, list[Boundary]]:
     import edge_tts
 
     communicate = edge_tts.Communicate(
@@ -79,35 +135,69 @@ async def _edge_synthesize(text: str, voice: str, rate: int, pitch: int, volume:
         connect_timeout=15,
         receive_timeout=90,
     )
+    audio = bytearray()
     boundaries: list[Boundary] = []
-    with open(out_path, "wb") as f:
-        async for chunk in communicate.stream():
-            if chunk["type"] == "audio":
-                f.write(chunk["data"])
-            elif chunk["type"] == "WordBoundary":
-                start = chunk["offset"] / TICKS_PER_SECOND
-                end = (chunk["offset"] + chunk["duration"]) / TICKS_PER_SECOND
-                boundaries.append(Boundary(chunk["text"], start, end))
-    return boundaries
+    async for chunk in communicate.stream():
+        if chunk["type"] == "audio":
+            audio += chunk["data"]
+        elif chunk["type"] == "WordBoundary":
+            start = chunk["offset"] / TICKS_PER_SECOND
+            end = (chunk["offset"] + chunk["duration"]) / TICKS_PER_SECOND
+            boundaries.append(Boundary(chunk["text"], start, end))
+    return bytes(audio), boundaries
 
 
-def edge_synthesize(text: str, voice: str, rate: int, pitch: int, volume: int, out_path: Path, attempts: int = 3) -> TTSResult:
+def _is_no_audio(exc: BaseException) -> bool:
+    return type(exc).__name__ == "NoAudioReceived"
+
+
+def _edge_chunk(text: str, voice: str, rate: int, pitch: int, volume: int, attempts: int) -> tuple[bytes, list[Boundary]]:
     last_exc: Exception | None = None
     for attempt in range(attempts):
         try:
-            boundaries = asyncio.run(_edge_synthesize(text, voice, rate, pitch, volume, out_path))
-            if out_path.stat().st_size == 0:
-                raise TTSError("Сервис озвучки вернул пустой звук")
-            return TTSResult(out_path, boundaries)
+            data, boundaries = asyncio.run(_edge_stream(text, voice, rate, pitch, volume))
+            if data:
+                return data, boundaries
+            last_exc = TTSError("пустой ответ")
         except ValueError as exc:  # неверное имя голоса или параметры — повтор не поможет
             raise TTSError(f"Неверные параметры озвучки: {exc}") from exc
-        except Exception as exc:  # сеть, временные ошибки сервиса
+        except Exception as exc:  # сбои сервиса и сети: пробуем ещё раз с паузой
             last_exc = exc
-            time.sleep(1.5 * (attempt + 1))
+        if attempt < attempts - 1:
+            time.sleep(min(8.0, 1.5 * 2 ** attempt))
+    phrase = text if len(text) <= 80 else text[:77] + "…"
+    if last_exc is not None and (_is_no_audio(last_exc) or isinstance(last_exc, TTSError)):
+        raise TTSError(
+            f"Microsoft не прислал звук для фразы «{phrase}» (голос {voice}), хотя связь есть. Обычно это "
+            "временный сбой сервиса, иногда — слово или символ, который голос не может произнести. "
+            "Попробуйте нажать «Создать видео» ещё раз через минуту, выбрать другой голос "
+            "или убрать из этой фразы необычные символы."
+        )
     raise TTSError(
-        "Не удалось получить озвучку от Microsoft Edge TTS. Проверьте интернет "
+        "Не удалось связаться с сервисом озвучки Microsoft. Проверьте интернет "
         f"(или укажите прокси в настройках). Ошибка: {type(last_exc).__name__}: {last_exc}"
     )
+
+
+def edge_synthesize(text: str, voice: str, rate: int, pitch: int, volume: int, out_path: Path, attempts: int = 5) -> TTSResult:
+    """Озвучивает текст по частям: сбой сервиса задевает одну короткую часть, и её
+    можно повторить, не переозвучивая всё остальное."""
+    problem = voice_language_problem(text, voice)
+    if problem:
+        raise TTSError(problem)
+    chunks = split_for_tts(text)
+    if not chunks:
+        raise TTSError("В тексте нет слов для озвучки")
+    audio = bytearray()
+    boundaries: list[Boundary] = []
+    offset = 0.0
+    for chunk in chunks:
+        data, chunk_boundaries = _edge_chunk(chunk, voice, rate, pitch, volume, attempts)
+        boundaries += [Boundary(b.text, b.start + offset, b.end + offset) for b in chunk_boundaries]
+        audio += data
+        offset += len(data) / MP3_BYTES_PER_SECOND
+    out_path.write_bytes(bytes(audio))
+    return TTSResult(out_path, boundaries)
 
 
 async def edge_list_voices() -> list[dict]:

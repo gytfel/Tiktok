@@ -129,6 +129,9 @@ def voices(refresh: bool = False) -> dict:
 def voice_preview(payload: dict = Body(...)) -> FileResponse:
     p = normalize({"voice": payload})["voice"]
     text = str(payload.get("text") or "Привет! Так будет звучать озвучка твоего видео.")[:300]
+    problem = tts.voice_language_problem(text, p["voice"])
+    if problem:
+        raise HTTPException(400, problem)
     key = hashlib.sha1(f"{p['voice']}|{p['rate']}|{p['pitch']}|{text}".encode()).hexdigest()[:16]
     cache = config.CACHE_DIR / "previews"
     cache.mkdir(parents=True, exist_ok=True)

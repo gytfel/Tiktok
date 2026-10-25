@@ -150,6 +150,7 @@ function syncForm() {
   showBgSection();
   markGradientSwatch();
   fillVoiceSelect(true);
+  updateVoiceWarning();
   renderMedia();
   renderScenes();
   renderMusicSelect();
@@ -167,8 +168,21 @@ function updateOutputs() {
     o.textContent = text;
   });
 }
+function updateVoiceWarning() {
+  // Та же проверка, что на сервере: английский и т.п. голос не прочитает русский текст.
+  const voice = state.project.voice.voice || "";
+  const letters = (state.project.text || "").match(/\p{L}/gu) || [];
+  const cyr = letters.filter((c) => /[\u0400-\u04FF]/.test(c)).length;
+  const lang = voice.split("-")[0].toLowerCase();
+  const ok = !voice || voice.startsWith("system:") || /multilingual/i.test(voice) ||
+    ["ru", "uk", "be", "bg", "sr", "mk", "kk", "ky", "mn", "tg", "tt", "ba"].includes(lang);
+  const el = $("#voiceWarn");
+  el.hidden = ok || !letters.length || cyr / letters.length <= 0.3;
+  el.textContent = "Этот голос не умеет читать русский текст — Microsoft не пришлёт звук. Выберите русский голос или голос с пометкой Multilingual.";
+}
 function onChange(path) {
   updateOutputs();
+  if (path === "text" || path === "voice.voice") updateVoiceWarning();
   if (path === "text" || path === "voice.rate") updateStats();
   if (path === "text") renderScenes();
   if (path.startsWith("music")) updateMusicPlayer();
@@ -1062,7 +1076,7 @@ async function init() {
   bindFields();
 
   $$(".tab").forEach((t) => t.addEventListener("click", () => openTab(t.dataset.tab)));
-  $("#voiceLang").addEventListener("change", () => { fillVoiceSelect(false); saveDraft(); });
+  $("#voiceLang").addEventListener("change", () => { fillVoiceSelect(false); updateVoiceWarning(); saveDraft(); });
   $("#previewVoiceBtn").addEventListener("click", previewVoice);
   $("#sampleBtn").addEventListener("click", () => {
     if (state.project.text.trim() && !confirm("Заменить текущий текст примером?")) return;

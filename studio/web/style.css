@@ -260,6 +260,8 @@ dialog::backdrop { background: rgba(0,0,0,.6); backdrop-filter: blur(3px); }
 .toast { background: #1f1f2b; border: 1px solid var(--line); border-left: 3px solid var(--cyan); padding: 11px 14px; border-radius: 10px; box-shadow: var(--shadow); animation: fade .2s ease; white-space: pre-wrap; }
 .toast.error { border-left-color: #ff4d6a; }
 
+.voice-warn { margin-top: 12px; background: rgba(255, 200, 80, .08); border: 1px solid rgba(255, 200, 80, .4); color: #ffe2a6; border-radius: 10px; padding: 9px 12px; font-size: 13px; }
+
 /* ---------- ИИ-картинки ---------- */
 .ai-status { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; margin-bottom: 14px; font-size: 13px; }
 .ai-status.ok { border-color: rgba(124, 240, 176, .35); }
