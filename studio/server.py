@@ -319,6 +319,8 @@ async def upload_raw(request: Request, name: str) -> dict:
         raise HTTPException(400, "Загрузка прервалась — попробуйте ещё раз")
     except OSError as exc:
         path.unlink(missing_ok=True)
+        if config.is_disk_full(exc):
+            raise HTTPException(507, config.disk_full_message()) from exc
         raise HTTPException(500, f"Не удалось записать файл в папку студии ({path.parent}): {exc}") from exc
     try:
         return await run_in_threadpool(library.finish_upload, item_id, name, path)

@@ -121,13 +121,13 @@ class JobManager:
             job.failed_stage = job.stage
             cancelled = job.cancel_event.is_set()
             job.status = "cancelled" if cancelled else "error"
-            job.error = None if cancelled else str(exc)
+            job.error = None if cancelled else (config.disk_full_message() if config.is_disk_full(exc) else str(exc))
             job.stage = "Отменено" if cancelled else "Ошибка"
             on_log(str(exc))
         except Exception as exc:  # неожиданные ошибки тоже показываем пользователю
             job.failed_stage = job.stage
             job.status = "error"
-            job.error = f"{type(exc).__name__}: {exc}"
+            job.error = config.disk_full_message() if config.is_disk_full(exc) else f"{type(exc).__name__}: {exc}"
             job.stage = "Ошибка"
             on_log(traceback.format_exc())
         finally:

@@ -14,12 +14,45 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import venv
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 REQUIREMENTS = ROOT / "requirements.txt"
 WINDOWS = os.name == "nt"
+NEEDED_MB = 500  # окружение с зависимостями + временные файлы установки
+NO_SPACE_MARKERS = ("no space left on device", "errno 28", "winerror 112", "not enough space on the disk")
+
+
+def free_space_report(paths: list[Path]) -> str:
+    """«D: — 0.2 ГБ, C: — 1.5 ГБ» по дискам, на которых лежат пути."""
+    seen: dict[str, int] = {}
+    for p in paths:
+        try:
+            anchor = Path(p).resolve().anchor or str(p)
+            if anchor not in seen:
+                seen[anchor] = shutil.disk_usage(anchor).free
+        except OSError:
+            continue
+    return ", ".join(f"{(a.rstrip(chr(92) + '/') or a)} — {free / 1024 ** 3:.1f} ГБ" for a, free in seen.items())
+
+
+def low_space(paths: list[Path], need_mb: int = NEEDED_MB) -> bool:
+    for p in paths:
+        try:
+            if shutil.disk_usage(Path(p).resolve().anchor or str(p)).free < need_mb * 1024 * 1024:
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def print_no_space(paths: list[Path]) -> None:
+    print("\nНа диске закончилось место — установка не помещается.")
+    print(f"Свободно: {free_space_report(paths)}. Для установки нужно около {NEEDED_MB} МБ, и ещё место под видео.")
+    print("Освободите место: очистите Корзину и папку «Загрузки», удалите ненужные программы или")
+    print("запустите «Очистку диска» Windows. Затем снова запустите start.bat.")
 
 
 def fallback_venv_dir() -> Path:
@@ -72,6 +105,10 @@ def create(venv_dir: Path, log=print) -> bool:
 
 def explain_failure(venv_dir: Path) -> None:
     """Показывает настоящую причину, которую venv прячет за «exit status 1»."""
+    disks = [ROOT, venv_dir.parent, Path(tempfile.gettempdir())]
+    if low_space(disks, need_mb=200):
+        print_no_space(disks)
+        return
     print("\nНе удалось подготовить Python для студии.")
     if importlib.util.find_spec("ensurepip") is None and importlib.util.find_spec("pip") is None:
         print("В вашем Python нет pip. Запустите установщик Python ещё раз → «Modify» →")
@@ -112,11 +149,32 @@ def install_requirements(venv_dir: Path) -> bool:
     marker = venv_dir / ".tiktok-studio-requirements"
     if marker.exists() and marker.read_text(encoding="utf-8").strip() == digest:
         return True
-    print("Устанавливаю зависимости...")
-    res = subprocess.run([str(venv_python(venv_dir)), "-m", "pip", "install", "-q",
-                          "--disable-pip-version-check", "-r", str(REQUIREMENTS)])
+    # Временные файлы pip — на тот же диск, что и окружение (а не на системный C:),
+    # и без кэша скачанных пакетов: так установке нужно меньше места.
+    tmp = venv_dir.parent / ".pip-tmp"
+    disks = [venv_dir, Path(tempfile.gettempdir())]
+    if low_space(disks):
+        print(f"Внимание: мало места на диске (свободно: {free_space_report(disks)}), установка может не поместиться.")
+    print("Устанавливаю зависимости... (несколько минут при первом запуске)")
+    try:
+        tmp.mkdir(parents=True, exist_ok=True)
+        env = {**os.environ, "TMP": str(tmp), "TEMP": str(tmp), "TMPDIR": str(tmp)}
+    except OSError:
+        env = dict(os.environ)
+    res = subprocess.run(
+        [str(venv_python(venv_dir)), "-m", "pip", "install", "-q", "--disable-pip-version-check",
+         "--no-cache-dir", "-r", str(REQUIREMENTS)],
+        env=env, capture_output=True, text=True, encoding="utf-8", errors="replace",
+    )
+    shutil.rmtree(tmp, ignore_errors=True)
+    output = (res.stdout or "") + (res.stderr or "")
+    if output.strip():
+        print(output.rstrip())
     if res.returncode != 0:
-        print("\nНе удалось установить зависимости. Проверьте подключение к интернету и запустите ещё раз.")
+        if any(m in output.lower() for m in NO_SPACE_MARKERS):
+            print_no_space(disks)
+        else:
+            print("\nНе удалось установить зависимости. Проверьте подключение к интернету и запустите ещё раз.")
         return False
     marker.write_text(digest, encoding="utf-8")
     return True

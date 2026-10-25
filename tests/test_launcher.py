@@ -34,8 +34,46 @@ def test_reports_failure(monkeypatch):
 
 
 def test_requirements_marker_skips_reinstall(tmp_path, monkeypatch):
-    calls = []
-    monkeypatch.setattr(launcher.subprocess, "run", lambda *a, **k: calls.append(a) or type("R", (), {"returncode": 0})())
-    assert launcher.install_requirements(tmp_path) and len(calls) == 1
-    assert launcher.install_requirements(tmp_path) and len(calls) == 1  # хэш совпал — pip не вызывается
+    run = FakeRun()
+    monkeypatch.setattr(launcher.subprocess, "run", run)
+    assert launcher.install_requirements(tmp_path) and len(run.calls) == 1
+    assert launcher.install_requirements(tmp_path) and len(run.calls) == 1  # хэш совпал — pip не вызывается
     assert isinstance(launcher.fallback_venv_dir(), Path)
+
+
+class FakeRun:
+    def __init__(self, returncode=0, output=""):
+        self.calls = []
+        self.result = type("R", (), {"returncode": returncode, "stdout": "", "stderr": output})()
+
+    def __call__(self, cmd, **kwargs):
+        self.calls.append((cmd, kwargs))
+        return self.result
+
+
+def test_install_uses_no_cache_and_temp_next_to_venv(tmp_path, monkeypatch):
+    run = FakeRun()
+    monkeypatch.setattr(launcher.subprocess, "run", run)
+    venv_dir = tmp_path / ".venv"
+    venv_dir.mkdir()
+    assert launcher.install_requirements(venv_dir)
+    cmd, kwargs = run.calls[0]
+    assert "--no-cache-dir" in cmd
+    assert kwargs["env"]["TEMP"] == str(tmp_path / ".pip-tmp")
+    assert not (tmp_path / ".pip-tmp").exists()  # временная папка убрана
+
+
+def test_install_reports_full_disk(tmp_path, monkeypatch, capsys):
+    run = FakeRun(1, "ERROR: Could not install packages due to an OSError: (\"Connection broken: "
+                     "OSError(28, 'No space left on device')\", OSError(28, 'No space left on device'))")
+    monkeypatch.setattr(launcher.subprocess, "run", run)
+    assert not launcher.install_requirements(tmp_path)
+    out = capsys.readouterr().out
+    assert "закончилось место" in out and "Свободно:" in out
+    assert "интернет" not in out.split("закончилось место")[1]
+
+
+def test_install_other_errors_mention_internet(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(launcher.subprocess, "run", FakeRun(1, "ERROR: No matching distribution found for fastapi"))
+    assert not launcher.install_requirements(tmp_path)
+    assert "интернету" in capsys.readouterr().out

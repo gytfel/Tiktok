@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
+import shutil
 import threading
 from pathlib import Path
 
@@ -111,6 +113,26 @@ def save_settings(values: dict) -> dict:
         ensure_dirs()
         SETTINGS_FILE.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
     return current
+
+
+def is_disk_full(error: BaseException | str) -> bool:
+    """Ошибка «нет места на диске» — от Python, ffmpeg или pip (в том числе Windows)."""
+    if isinstance(error, OSError) and error.errno == errno.ENOSPC:
+        return True
+    text = str(error).lower()
+    return any(m in text for m in ("no space left on device", "errno 28", "winerror 112", "not enough space on the disk"))
+
+
+def disk_full_message() -> str:
+    try:
+        free = shutil.disk_usage(WORKSPACE_DIR).free / 1024 ** 3
+        where = f" (свободно {free:.1f} ГБ на диске {WORKSPACE_DIR.anchor.rstrip(chr(92) + '/') or WORKSPACE_DIR.anchor})"
+    except OSError:
+        where = ""
+    return (
+        f"На диске закончилось место{where}. Освободите место — например, удалите старые ролики "
+        "в «Мои видео», очистите Корзину и папку «Загрузки» — и попробуйте снова."
+    )
 
 
 def get_proxy() -> str | None:

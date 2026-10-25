@@ -60,3 +60,13 @@ def test_body_parse_error_shows_real_cause(client, monkeypatch):
     resp = client.post("/api/uploads", files={"files": ("big.mp3", b"\x00" * 3_000_000, "audio/mpeg")})
     assert resp.status_code == 400
     assert "PermissionError" in resp.json()["detail"]
+
+
+def test_disk_full_detection():
+    import errno
+
+    assert config.is_disk_full(OSError(errno.ENOSPC, "No space left on device"))
+    assert config.is_disk_full("ffmpeg: Error writing trailer: No space left on device")
+    assert config.is_disk_full("[WinError 112] There is not enough space on the disk")
+    assert not config.is_disk_full(OSError(errno.EACCES, "Permission denied"))
+    assert "закончилось место" in config.disk_full_message()
