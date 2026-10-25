@@ -84,6 +84,8 @@ DEFAULT_SETTINGS = {
     "pollinations_key": "",
     "pollinations_image_model": "",  # пусто — модель сервиса по умолчанию
     "pollinations_video_model": "",
+    # Код доступа с телефона (создаётся автоматически при первом запуске start-phone.bat).
+    "phone_key": "",
 }
 
 _settings_lock = threading.Lock()

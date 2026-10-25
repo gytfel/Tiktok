@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import mimetypes
 import os
 import tempfile
 from pathlib import Path
@@ -15,7 +16,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.requests import ClientDisconnect
 from fastapi.staticfiles import StaticFiles
 
-from . import __version__, ai, config, library, tts
+from . import __version__, ai, config, library, phone, tts
 from .backgrounds import GRADIENT_PRESETS
 from .ffmpeg_utils import capabilities
 from .text_utils import clean_text
@@ -25,8 +26,10 @@ from .project import DEFAULT_PROJECT, normalize
 from .subtitles import font_height_ratio
 
 config.ensure_dirs()
+mimetypes.add_type("application/manifest+json", ".webmanifest")
 
 app = FastAPI(title="TikTok Studio", version=__version__)
+app.add_middleware(phone.PhoneGuard)
 manager = JobManager(keep_job_dirs=os.environ.get("TIKTOK_STUDIO_KEEP_JOBS") == "1")
 
 
@@ -112,6 +115,18 @@ def get_settings() -> dict:
 def update_settings(values: dict = Body(...)) -> dict:
     config.save_settings(values)
     return _public_settings()
+
+
+@app.get("/api/phone")
+def phone_access(request: Request) -> dict:
+    """Ссылка и QR-код для телефона. Код доступа видно только на этом компьютере."""
+    local = phone.is_local(request.client.host if request.client else "")
+    data = {"enabled": phone.enabled(), "remote": not local, "urls": [], "key": "", "qr": None}
+    if phone.enabled() and local:
+        data["urls"] = phone.phone_urls()
+        data["key"] = phone.access_key()
+        data["qr"] = phone.qr_svg(data["urls"][0]) if data["urls"] else None
+    return data
 
 
 # ------------------------------------------------------------- голоса

@@ -284,3 +284,14 @@ dialog::backdrop { background: rgba(0,0,0,.6); backdrop-filter: blur(3px); }
 .scene .state.err { color: #ff9aac; }
 dialog { max-height: calc(100vh - 32px); overflow: auto; }
 .ai-settings { border-left: 2px solid var(--line); padding-left: 12px; margin-bottom: 12px; }
+
+/* ---------- телефон ---------- */
+.phone-qr { display: flex; gap: 18px; align-items: center; flex-wrap: wrap; margin-bottom: 14px; }
+.phone-qr .qr { background: #fff; border-radius: 12px; padding: 6px; line-height: 0; }
+.phone-qr .qr svg { width: 190px; height: 190px; display: block; }
+/* Общие стили иконок (толстая обводка, скругления) не должны портить QR-код. */
+.phone-qr .qr svg, .phone-qr .qr svg * { stroke-width: 1; stroke-linecap: butt; stroke-linejoin: miter; fill: none; }
+.phone-qr .code { font: 700 26px/1.2 ui-monospace, Consolas, monospace; letter-spacing: 3px; color: #fff; }
+.phone-url { word-break: break-all; font-size: 13px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 9px; padding: 8px 10px; margin: 6px 0 12px; }
+.phone-steps { margin: 0 0 6px; padding-left: 20px; color: var(--text); font-size: 13.5px; }
+.phone-steps li { margin-bottom: 6px; }

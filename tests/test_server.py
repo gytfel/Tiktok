@@ -18,7 +18,7 @@ def client(tmp_path, monkeypatch):
     config.ensure_dirs()
     from studio.server import app
 
-    return testclient.TestClient(app)
+    return testclient.TestClient(app, client=("127.0.0.1", 50000))  # запросы «с этого компьютера»
 
 
 @pytest.mark.skipif(not capabilities()["found"], reason="нужен ffmpeg")

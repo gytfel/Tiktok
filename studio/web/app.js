@@ -284,7 +284,14 @@ async function previewVoice() {
     const audio = $("#voiceAudio");
     if (audio.src) URL.revokeObjectURL(audio.src);
     audio.src = URL.createObjectURL(blob);
-    await audio.play();
+    try {
+      await audio.play();
+    } catch (_) {
+      // iPhone не разрешает включить звук без отдельного нажатия — показываем плеер.
+      audio.controls = true;
+      audio.hidden = false;
+      toast("Нажмите ▶ в плеере под кнопкой, чтобы прослушать");
+    }
   } catch (e) {
     toast(e.message, "error", 9000);
   } finally {
@@ -1028,6 +1035,52 @@ function setupSettings() {
   $("#settingsForm").ai_provider.addEventListener("change", showAiSettings);
 }
 
+// ------------------------------------------------------------------ телефон
+
+async function openPhone() {
+  const body = $("#phoneBody");
+  body.innerHTML = '<p class="hint">Загрузка…</p>';
+  $("#phoneDialog").showModal();
+  let data;
+  try { data = await api("/api/phone"); } catch (e) { body.textContent = e.message; return; }
+  if (!data.enabled) {
+    body.innerHTML = `<p>Сейчас студия открыта только на этом компьютере.</p>
+      <ol class="phone-steps">
+        <li>Закройте окно студии (чёрное окно с текстом).</li>
+        <li>Запустите <b>start-phone.bat</b> из папки студии (на Mac/Linux: <code>./start.sh --phone</code>).</li>
+        <li>Снова нажмите эту кнопку — появится QR-код для телефона.</li>
+      </ol>`;
+    return;
+  }
+  if (!data.urls.length) {
+    body.innerHTML = `<p>Не удалось найти адрес компьютера в сети. Проверьте, что компьютер подключён к Wi-Fi или роутеру кабелем, и перезапустите студию.</p>`;
+    return;
+  }
+  body.innerHTML = `<div class="phone-qr">
+      ${data.qr ? `<div class="qr">${data.qr}</div>` : ""}
+      <div><div class="hint">Код доступа</div><div class="code">${esc(data.key)}</div></div>
+    </div>
+    <ol class="phone-steps">
+      <li>Подключите телефон к <b>тому же Wi-Fi</b>, что и компьютер.</li>
+      <li>Наведите камеру телефона на QR-код и откройте ссылку. Или наберите адрес в браузере телефона:</li>
+    </ol>
+    ${data.urls.map((u) => `<div class="phone-url">${esc(u)}</div>`).join("")}
+    <ol class="phone-steps" start="3">
+      <li>Чтобы студия была под рукой, добавьте её на главный экран: в Safari — «Поделиться → На экран Домой», в Chrome — «⋮ → Добавить на главный экран».</li>
+      <li>Компьютер со студией должен оставаться включённым: видео собирается на нём, телефон — пульт.</li>
+    </ol>
+    <p class="hint">Не открывается? Windows могла заблокировать доступ: при запуске разрешите доступ для «Частных сетей», а сеть Wi-Fi в параметрах Windows должна быть «Частной».</p>`;
+}
+async function setupPhone() {
+  $("#phoneBtn").addEventListener("click", openPhone);
+  $("#phoneClose").addEventListener("click", () => $("#phoneDialog").close());
+  try {
+    const data = await api("/api/phone");
+    if (data.remote) $("#phoneBtn").hidden = true; // уже открыто с телефона
+    else if (data.enabled && location.hash === "#phone") openPhone();
+  } catch (_) { /* не критично */ }
+}
+
 // ------------------------------------------------------------------ запуск
 
 function openTab(name) {
@@ -1073,6 +1126,7 @@ async function init() {
   setupRender();
   setupGallery();
   setupSettings();
+  setupPhone();
   bindFields();
 
   $$(".tab").forEach((t) => t.addEventListener("click", () => openTab(t.dataset.tab)));
