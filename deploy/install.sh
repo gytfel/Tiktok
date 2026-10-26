@@ -78,59 +78,30 @@ fi
 
 # ------------------------------------------------------------------ порты 80 и 443
 
-# Кто слушает TCP-порт: строки «программа pid» (Caddy студии сюда тоже попадает).
-port_users() {
-  ss -Hltnp "sport = :$1" 2>/dev/null | grep -o '("[^"]*",pid=[0-9]*' | sed 's/("\([^"]*\)",pid=\([0-9]*\)/\1 \2/' | sort -u || true
-}
-
-service_of() {
-  grep -q 'user@' "/proc/$1/cgroup" 2>/dev/null && return 0
-  grep -o '[^/]*\.service$' "/proc/$1/cgroup" 2>/dev/null | head -1 || true
-}
-
-# Чужие программы на портах 80/443: «порт 443: jupyter-lab (служба jupyter.service)».
-port_conflicts() {
-  local port name pid unit
-  for port in 80 443; do
-    while read -r name pid; do
-      [ -n "$pid" ] && [ "$name" != caddy ] || continue
-      unit="$(service_of "$pid")"
-      printf '  порт %s: %s%s\n' "$port" "$name" "${unit:+ (служба $unit)}"
-    done < <(port_users "$port")
-  done
-}
-
-free_ports() {
-  local port name pid unit ids
-  for port in 80 443; do
-    while read -r name pid; do
-      [ -n "$pid" ] && [ "$name" != caddy ] || continue
-      if [ "$name" = docker-proxy ] && command -v docker >/dev/null 2>&1; then
-        ids="$(docker ps -q --filter "publish=$port")"
-        if [ -n "$ids" ]; then
-          # shellcheck disable=SC2086
-          docker update --restart=no $ids >/dev/null && docker stop $ids >/dev/null
-          say "Остановил Docker-контейнер(ы), занимавшие порт $port: ${ids//$'\n'/ }"
-        fi
-        continue
-      fi
-      unit="$(service_of "$pid")"
-      if [ -n "$unit" ] && [ -z "${TS_NO_SYSTEMD:-}" ] && systemctl disable --now "$unit" >/dev/null 2>&1; then
-        say "Остановил и отключил службу $unit ($name), занимавшую порт $port"
-      elif kill "$pid" 2>/dev/null; then
-        say "Остановил программу $name (pid $pid), занимавшую порт $port"
-      fi
-    done < <(port_users "$port")
-  done
-  sleep 2
-}
-
+# Порты проверяет та же программа, что потом ставится как «tiktok-studio» (ports, free-ports).
 if [ -z "${TS_SKIP_CADDY:-}" ] || [ -n "${TS_CHECK_PORTS:-}" ]; then
-  conflicts="$(port_conflicts)"
-  if [ -n "$conflicts" ] && [ -n "$FREE_PORTS" ]; then
-    free_ports
-    conflicts="$(port_conflicts)"
+  ports_tool="$(mktemp)"
+  if [ -n "${TS_SOURCE_DIR:-}" ]; then
+    cp "$TS_SOURCE_DIR/deploy/tiktok-studio" "$ports_tool"
+  else
+    curl -fsSL "https://raw.githubusercontent.com/$REPO/$BRANCH/deploy/tiktok-studio" -o "$ports_tool" \
+      || die "не удалось скачать файлы студии с GitHub — проверьте интернет на сервере."
   fi
+  conflicts="$(bash "$ports_tool" ports || true)"
+  if [ -n "$conflicts" ] && [ -n "$FREE_PORTS" ]; then
+    say "Освобождаю порты 80 и 443…"
+    bash "$ports_tool" free-ports 2>/dev/null | sed 's/^/  /' || true
+    conflicts="$(bash "$ports_tool" ports || true)"
+    if [ -n "$conflicts" ]; then
+      rm -f "$ports_tool"
+      die "не получилось освободить порты 80 и 443 — программа на них запускается снова:
+$conflicts
+В скобках — кто ею управляет (контейнер, служба или цепочка процессов, которая её перезапускает).
+Самый надёжный выход — в панели хостинга переустановить систему сервера на чистую Ubuntu 24.04
+(без приложений и шаблонов) и запустить установку заново."
+    fi
+  fi
+  rm -f "$ports_tool"
   if [ -n "$conflicts" ]; then
     die "студии нужны порты 80 и 443 (через них работает HTTPS), но их занимает другая программа:
 $conflicts
