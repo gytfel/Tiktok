@@ -1159,6 +1159,136 @@ async function setupPhone() {
   } catch (_) { /* не критично */ }
 }
 
+// ------------------------------------------------------------------ по образцу
+
+// phase: form → busy → result. Разбор идёт на сервере, окно можно закрыть и открыть снова.
+const ref = { phase: "form", file: null, result: null, stage: "", progress: 0 };
+
+function showRef() {
+  $("#refForm").hidden = ref.phase !== "form";
+  $("#refProgress").hidden = ref.phase !== "busy";
+  $("#refResult").hidden = ref.phase !== "result";
+  $("#refStart").hidden = ref.phase !== "form";
+  $("#refApply").hidden = ref.phase !== "result";
+  $("#refAgain").hidden = ref.phase !== "result";
+  $("#refStage").textContent = ref.stage || "Подготовка…";
+  $("#refBar").style.width = `${ref.progress}%`;
+  $("#refFileName").textContent = ref.file ? ref.file.name : "";
+}
+function openRef() {
+  if (ref.phase === "form") {
+    const ready = state.status?.settings?.ai_ready;
+    $("#refError").hidden = ready;
+    if (!ready) $("#refError").textContent = "Для разбора образца нужна нейросеть: выберите сервис и вставьте ключ в ⚙ Настройках (подойдёт бесплатный Cloudflare).";
+  }
+  showRef();
+  $("#refDialog").showModal();
+}
+function refProgress(stage, progress) {
+  ref.stage = stage;
+  ref.progress = Math.max(0, Math.min(100, Math.round(progress)));
+  showRef();
+}
+async function startRef() {
+  const url = $("#refUrl").value.trim();
+  if (!url && !ref.file) {
+    $("#refError").hidden = false;
+    $("#refError").textContent = "Вставьте ссылку на ролик или загрузите видео.";
+    return;
+  }
+  $("#refError").hidden = true;
+  ref.phase = "busy";
+  refProgress(url ? "Скачиваю видео…" : "Загружаю видео…", 0);
+  try {
+    let uploadId = null;
+    if (!url) {
+      const file = ref.file;
+      const meta = await uploadOne(file, (loaded) => refProgress(`Загружаю видео… ${Math.round((loaded / file.size) * 100)}%`, (loaded / file.size) * 15));
+      uploadId = meta.id;
+    }
+    let task = await api("/api/reference", {
+      method: "POST",
+      body: {
+        url,
+        upload_id: uploadId,
+        topic: $("#refTopic").value.trim(),
+        mode: $("#refMode").value,
+        language: $("#refLang").value,
+        voice: state.project.voice.voice,
+      },
+    });
+    while (task.status === "running") {
+      refProgress(task.stage || "Разбираю образец…", Math.max(ref.progress, task.progress || 0));
+      await new Promise((r) => setTimeout(r, 2000));
+      task = await api(`/api/ai/tasks/${task.id}`);
+    }
+    if (task.status === "error") throw new Error(task.error || "Не удалось разобрать образец");
+    ref.result = task.result;
+    ref.phase = "result";
+    renderRefResult();
+    loadUploads(); // скачанный образец появился в библиотеке
+    if (!$("#refDialog").open) toast("Образец разобран — нажмите «🎬 По образцу», чтобы применить основу.", "info", 10000);
+  } catch (e) {
+    ref.phase = "form";
+    $("#refError").hidden = false;
+    $("#refError").textContent = e.message;
+    if (!$("#refDialog").open) toast(e.message, "error", 12000);
+  }
+  showRef();
+}
+function renderRefResult() {
+  const r = ref.result;
+  const info = r.reference;
+  const facts = [
+    `${Math.round(info.duration)} сек`,
+    `${info.shots.length} ${plural(info.shots.length, "кадр", "кадра", "кадров")}`,
+    info.transcript ? `речь: ${info.language || "?"}${info.pace ? `, ~${info.pace} символов в секунду` : ""}` : "без речи",
+  ].join(" · ");
+  const paragraphs = r.project.text.split(/\n\n+/);
+  const scenes = r.project.background.ai_scenes;
+  const firstPrompt = (para) => (scenes.find((sc) => para.includes(sc.text) || sc.text.includes(para)) || {}).prompt || "";
+  $("#refResult").innerHTML = `
+    <img class="ref-sheet" src="${info.sheet}" alt="Кадры образца">
+    <p class="ref-facts">Образец: ${esc(facts)}</p>
+    ${r.summary ? `<p class="ref-summary">${esc(r.summary)}</p>` : ""}
+    ${r.warnings.map((w) => `<p class="ref-warn">${esc(w)}</p>`).join("")}
+    <h3 class="sub-head">Основа вашего ролика</h3>
+    ${r.project.title?.text ? `<p><b>Заголовок:</b> ${esc(r.project.title.text)}</p>` : ""}
+    <ol class="ref-scenes">${paragraphs.map((t) => `<li>${esc(t)}<span class="hint">${esc(firstPrompt(t))}</span></li>`).join("")}</ol>
+    ${info.transcript ? `<details class="tech"><summary>Что говорят в образце</summary><p>${esc(info.transcript)}</p></details>` : ""}
+    <p class="hint">«Применить» заменит текст, заголовок, голос и фон проекта: фон станет «ИИ-картинки» с готовыми описаниями кадров. Картинки нарисуются при создании видео или кнопкой «Нарисовать все» — неудачные можно перерисовать.</p>`;
+}
+function applyRef() {
+  if (state.project.text.trim() && !confirm("Заменить текущий текст и кадры основой из образца?")) return;
+  state.project = mergeDefaults(state.project, ref.result.project);
+  syncForm();
+  saveDraft();
+  openTab("bg");
+  $("#refDialog").close();
+  ref.phase = "form";
+  ref.result = null;
+  showRef();
+  window.scrollTo({ top: 0, behavior: "smooth" });
+  toast("Основа готова: проверьте текст и кадры на вкладке «Фон», затем нажмите «Создать видео».", "info", 9000);
+}
+function setupReference() {
+  $("#refBtn").addEventListener("click", openRef);
+  $("#refClose").addEventListener("click", () => $("#refDialog").close());
+  $("#refStart").addEventListener("click", startRef);
+  $("#refApply").addEventListener("click", applyRef);
+  $("#refAgain").addEventListener("click", () => { ref.phase = "form"; ref.result = null; showRef(); });
+  $("#refPick").addEventListener("click", () => $("#refFile").click());
+  $("#refFile").addEventListener("change", (e) => {
+    ref.file = e.target.files[0] || null;
+    if (ref.file) $("#refUrl").value = "";
+    e.target.value = "";
+    showRef();
+  });
+  $("#refUrl").addEventListener("input", () => {
+    if ($("#refUrl").value.trim() && ref.file) { ref.file = null; showRef(); }
+  });
+}
+
 // ------------------------------------------------------------------ запуск
 
 function openTab(name) {
@@ -1205,6 +1335,7 @@ async function init() {
   setupGallery();
   setupSettings();
   setupPhone();
+  setupReference();
   bindFields();
 
   $$(".tab").forEach((t) => t.addEventListener("click", () => openTab(t.dataset.tab)));

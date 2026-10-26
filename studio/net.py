@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import urllib.error
 import urllib.request
+import uuid
 
 from . import config
 
@@ -32,10 +33,11 @@ def request(
     method: str = "GET",
     headers: dict | None = None,
     json_body: object | None = None,
+    data: bytes | None = None,
     timeout: float = 60,
 ) -> tuple[int, str, bytes]:
-    """Выполняет запрос и возвращает (код, content-type, тело). Ошибки HTTP -> NetError."""
-    data = None
+    """Выполняет запрос и возвращает (код, content-type, тело). Ошибки HTTP -> NetError.
+    Тело — json_body (будет JSON) или готовые байты data (Content-Type — в headers)."""
     hdrs = {"User-Agent": USER_AGENT, **(headers or {})}
     if json_body is not None:
         data = json.dumps(json_body, ensure_ascii=False).encode("utf-8")
@@ -49,6 +51,22 @@ def request(
         raise NetError(error_message(body) or f"HTTP {exc.code}", exc.code, body) from exc
     except OSError as exc:  # нет сети, таймаут, DNS
         raise NetError(f"нет связи с сервисом ({exc})") from exc
+
+
+def multipart(fields: dict[str, str], files: dict[str, tuple[str, bytes, str]]) -> tuple[bytes, str]:
+    """Тело multipart/form-data: обычные поля и файлы {поле: (имя, байты, тип)}."""
+    boundary = "----TikTokStudio" + uuid.uuid4().hex
+    parts: list[bytes] = []
+    for name, value in fields.items():
+        parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode())
+    for name, (filename, content, ctype) in files.items():
+        head = (
+            f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"; filename="{filename}"\r\n'
+            f"Content-Type: {ctype}\r\n\r\n"
+        )
+        parts.append(head.encode() + content + b"\r\n")
+    parts.append(f"--{boundary}--\r\n".encode())
+    return b"".join(parts), f"multipart/form-data; boundary={boundary}"
 
 
 def error_message(body: bytes) -> str:

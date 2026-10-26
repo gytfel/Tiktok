@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from . import config, library
-from .net import NetError, parse_json, request
+from .net import NetError, multipart, parse_json, request
 from .text_utils import tokenize
 
 # ---------------------------------------------------------------- стили
@@ -45,6 +45,9 @@ CF_IMAGE_MODELS = {
     "sdxl": "@cf/bytedance/stable-diffusion-xl-lightning",
 }
 CF_TEXT_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
+CF_STT_MODEL = "@cf/openai/whisper-large-v3-turbo"  # распознавание речи
+CF_VISION_MODEL = "@cf/meta/llama-4-scout-17b-16e-instruct"  # понимает картинки
+POLLINATIONS_STT_MODEL = "openai/whisper-large-v3"
 POLLINATIONS_BASE = "https://gen.pollinations.ai"
 VIDEO_DURATIONS = (4, 6, 8)
 
@@ -129,6 +132,68 @@ def same_text(a: str, b: str) -> bool:
     return " ".join(a.split()) == " ".join(b.split())
 
 
+# ---------------------------------------------------------------- распознанная речь
+
+
+@dataclass
+class Transcript:
+    text: str
+    language: str  # код ISO-639-1 («ru», «en») или ""
+    words: list[tuple[str, float, float]]  # слово, начало и конец в секундах
+
+
+def transcript_from(result: dict, duration: float = 0.0) -> Transcript:
+    """Приводит ответы разных моделей Whisper к одному виду. Если у слов нет
+    своих времён, раскладывает слова фразы равномерно по её длительности."""
+    if not isinstance(result, dict):
+        raise AIError("Сервис распознавания речи вернул неожиданный ответ")
+    info = result.get("transcription_info") if isinstance(result.get("transcription_info"), dict) else {}
+    language = str(info.get("language") or result.get("language") or "").strip().lower()
+    names = {"russian": "ru", "english": "en", "ukrainian": "uk", "kazakh": "kk", "german": "de", "french": "fr",
+             "spanish": "es", "italian": "it", "portuguese": "pt", "polish": "pl", "turkish": "tr"}
+    language = names.get(language, language)[:5]
+    words: list[tuple[str, float, float]] = []
+
+    def add_words(items: list) -> None:
+        for w in items:
+            if isinstance(w, dict) and str(w.get("word") or "").strip():
+                try:
+                    words.append((str(w["word"]).strip(), float(w["start"]), float(w["end"])))
+                except (KeyError, TypeError, ValueError):
+                    continue
+
+    def spread(text: str, start: float, end: float) -> None:
+        parts = text.split()
+        step = max(end - start, 0.0) / max(len(parts), 1)
+        for i, word in enumerate(parts):
+            words.append((word, start + i * step, start + (i + 1) * step))
+
+    if isinstance(result.get("words"), list) and result["words"]:
+        add_words(result["words"])
+    else:
+        for seg in result.get("segments") or []:
+            if not isinstance(seg, dict):
+                continue
+            before = len(words)
+            if isinstance(seg.get("words"), list):
+                add_words(seg["words"])
+            if len(words) == before:
+                try:
+                    spread(str(seg.get("text") or ""), float(seg.get("start") or 0), float(seg.get("end") or 0))
+                except (TypeError, ValueError):
+                    continue
+    text = " ".join(str(result.get("text") or "").split())
+    if not words and text:
+        spread(text, 0.0, duration)
+    if not text:
+        text = " ".join(w for w, _, _ in words)
+    return Transcript(text=text, language=language, words=words)
+
+
+def _data_url(jpeg: bytes) -> str:
+    return "data:image/jpeg;base64," + base64.b64encode(jpeg).decode("ascii")
+
+
 # ---------------------------------------------------------------- сервисы
 
 
@@ -137,8 +202,15 @@ class Provider:
     label = ""
     supports_video = False
 
-    def chat(self, system: str, user: str) -> str:
+    def chat(self, system: str, user: str, max_tokens: int = 1500) -> str:
         raise NotImplementedError
+
+    def transcribe(self, audio: bytes, duration: float = 0.0) -> Transcript:
+        raise AIError(f"{self.label} не умеет распознавать речь")
+
+    def look(self, image: bytes, prompt: str) -> str:
+        """Ответ модели, которая видит картинку (JPEG)."""
+        raise AIError(f"{self.label} не умеет описывать картинки")
 
     def image(self, prompt: str, seed: int) -> bytes:
         raise NotImplementedError
@@ -178,19 +250,24 @@ class CloudflareProvider(Provider):
             return "Cloudflare: слишком много запросов, подождите минуту."
         return f"Cloudflare: {msg}"
 
-    def chat(self, system: str, user: str) -> str:
+    def chat(self, system: str, user: str, max_tokens: int = 1500) -> str:
         payload = {
             "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
-            "max_tokens": 1500,
+            "max_tokens": max_tokens,
             "temperature": 0.7,
             "response_format": {"type": "json_object"},
         }
+        return self._ask(CF_TEXT_MODEL, payload)
+
+    def _ask(self, model: str, payload: dict) -> str:
         try:
-            _, body = self._run(CF_TEXT_MODEL, payload)
-        except AIError:
+            _, body = self._run(model, payload, timeout=180)
+        except AIError as exc:
+            if "response_format" not in payload or "лимит" in str(exc):
+                raise
             # Если модель не поддерживает JSON-режим, пробуем ещё раз без него.
-            payload.pop("response_format")
-            _, body = self._run(CF_TEXT_MODEL, payload)
+            payload = {k: v for k, v in payload.items() if k != "response_format"}
+            _, body = self._run(model, payload, timeout=180)
         data = parse_json(body)
         result = data.get("result", data) if isinstance(data, dict) else data
         response = result.get("response") if isinstance(result, dict) else result
@@ -199,6 +276,23 @@ class CloudflareProvider(Provider):
         if not response:
             raise AIError("Cloudflare: языковая модель вернула пустой ответ")
         return str(response)
+
+    def transcribe(self, audio: bytes, duration: float = 0.0) -> Transcript:
+        payload = {"audio": base64.b64encode(audio).decode("ascii"), "task": "transcribe", "vad_filter": True}
+        _, body = self._run(CF_STT_MODEL, payload, timeout=300)
+        data = parse_json(body)
+        result = data.get("result", data) if isinstance(data, dict) else data
+        return transcript_from(result, duration)
+
+    def look(self, image: bytes, prompt: str) -> str:
+        content = [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": _data_url(image)}}]
+        payload = {
+            "messages": [{"role": "user", "content": content}],
+            "max_tokens": 2500,
+            "temperature": 0.2,
+            "response_format": {"type": "json_object"},
+        }
+        return self._ask(CF_VISION_MODEL, payload)
 
     def image(self, prompt: str, seed: int) -> bytes:
         if self.image_model == CF_IMAGE_MODELS["sdxl"]:
@@ -247,14 +341,17 @@ class PollinationsProvider(Provider):
         except NetError as exc:
             raise AIError(self._explain(exc)) from exc
 
-    def chat(self, system: str, user: str) -> str:
+    def chat(self, system: str, user: str, max_tokens: int = 1500) -> str:
+        return self._chat([{"role": "system", "content": system}, {"role": "user", "content": user}])
+
+    def _chat(self, messages: list[dict]) -> str:
         try:
             _, _, body = request(
                 f"{POLLINATIONS_BASE}/v1/chat/completions",
                 method="POST",
                 headers=self._auth,
-                json_body={"messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]},
-                timeout=120,
+                json_body={"messages": messages},
+                timeout=180,
             )
         except NetError as exc:
             raise AIError(self._explain(exc)) from exc
@@ -263,6 +360,30 @@ class PollinationsProvider(Provider):
             return str(data["choices"][0]["message"]["content"])
         except (KeyError, IndexError, TypeError) as exc:
             raise AIError("Pollinations: неожиданный ответ языковой модели") from exc
+
+    def transcribe(self, audio: bytes, duration: float = 0.0) -> Transcript:
+        fields = {"model": POLLINATIONS_STT_MODEL, "response_format": "verbose_json"}
+        for attempt in (1, 2):
+            data, ctype = multipart(fields, {"file": ("audio.mp3", audio, "audio/mpeg")})
+            try:
+                _, _, body = request(
+                    f"{POLLINATIONS_BASE}/v1/audio/transcriptions",
+                    method="POST",
+                    headers={**self._auth, "Content-Type": ctype},
+                    data=data,
+                    timeout=300,
+                )
+                return transcript_from(parse_json(body), duration)
+            except NetError as exc:
+                if exc.status == 400 and attempt == 1:  # модель не умеет verbose_json — берём простой текст
+                    fields = {"model": POLLINATIONS_STT_MODEL}
+                    continue
+                raise AIError(self._explain(exc)) from exc
+        raise AIError("Pollinations не распознал речь")
+
+    def look(self, image: bytes, prompt: str) -> str:
+        content = [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": _data_url(image)}}]
+        return self._chat([{"role": "user", "content": content}])
 
     def image(self, prompt: str, seed: int) -> bytes:
         params = {"width": IMAGE_W, "height": IMAGE_H, "seed": seed}

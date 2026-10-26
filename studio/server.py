@@ -18,7 +18,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.requests import ClientDisconnect
 from fastapi.staticfiles import StaticFiles
 
-from . import __version__, ai, config, library, phone, tts
+from . import __version__, ai, config, library, phone, reference, tts
 from .tunnel import tunnel
 from .backgrounds import GRADIENT_PRESETS
 from .ffmpeg_utils import capabilities
@@ -274,6 +274,51 @@ def ai_video(payload: dict = Body(...)) -> dict:
             task["status"] = "error"
 
     threading.Thread(target=work, daemon=True, name=f"ai-video-{task_id}").start()
+    return task
+
+
+@app.post("/api/reference")
+def reference_start(payload: dict = Body(...)) -> dict:
+    """Похожее видео по образцу: скачивает ролик по ссылке (или берёт загруженный),
+    разбирает его и возвращает основу проекта. Идёт в фоне, как ИИ-видео."""
+    provider = _provider()
+    url = str(payload.get("url") or "").strip()
+    upload_id = str(payload.get("upload_id") or "").strip()
+    if not url and not upload_id:
+        raise HTTPException(400, "Загрузите видео-образец или вставьте ссылку на ролик")
+    if url and not reference.is_url(url):
+        raise HTTPException(400, "Это не похоже на ссылку — скопируйте её целиком, вместе с https://")
+    options = {
+        "topic": str(payload.get("topic") or "")[:500],
+        "mode": str(payload.get("mode") or "adapt"),
+        "language": str(payload.get("language") or "ru"),
+        "current_voice": str(payload.get("voice") or ""),
+    }
+    task_id = uuid.uuid4().hex[:12]
+    task = _ai_tasks[task_id] = {"id": task_id, "status": "running", "stage": "", "progress": 0, "result": None, "error": None}
+
+    def work() -> None:
+        try:
+            item_id = upload_id
+            if url:
+                task.update(stage="Скачиваю видео…")
+                item_id = reference.download(url, on_progress=lambda f: task.update(progress=round(f * 15)))["id"]
+
+            def on_stage(text: str, frac: float) -> None:
+                task.update(stage=text, progress=round(15 + frac * 85))
+
+            task["result"] = reference.analyze(item_id, provider, on_stage=on_stage, **options)
+            task["status"] = "done"
+        except Exception as exc:  # показываем пользователю любую причину
+            if config.is_disk_full(exc):
+                task["error"] = config.disk_full_message()
+            elif isinstance(exc, (reference.ReferenceError, ai.AIError)):
+                task["error"] = str(exc)
+            else:
+                task["error"] = f"{type(exc).__name__}: {exc}"
+            task["status"] = "error"
+
+    threading.Thread(target=work, daemon=True, name=f"reference-{task_id}").start()
     return task
 
 

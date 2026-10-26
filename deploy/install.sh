@@ -199,6 +199,9 @@ if [ ! -x "$VENV/bin/python" ] || ! "$VENV/bin/python" -m pip --version >/dev/nu
   python3 -m venv "$VENV"
 fi
 "$VENV/bin/python" -m pip install -q --no-cache-dir --disable-pip-version-check -r "$APP_DIR/requirements.txt"
+# yt-dlp (видео-образцы по ссылке) часто чинят под изменения сайтов — при каждом обновлении берём свежий.
+"$VENV/bin/python" -m pip install -q --no-cache-dir --disable-pip-version-check -U "yt-dlp[default,curl-cffi]" \
+  || warn "Не удалось обновить yt-dlp — видео по ссылке могут не скачиваться, файлом загружать можно."
 chmod -R a+rX "$VENV"
 
 # Студия проверена с ffmpeg 6 и 7. В Ubuntu 22.04 из пакетов ставится 4.4 —

@@ -39,7 +39,10 @@
     <div class="card">
       <div class="card-head">
         <h2>Текст ролика</h2>
-        <button class="link-btn" id="sampleBtn">Вставить пример</button>
+        <div class="head-actions">
+          <button class="btn secondary small" id="refBtn" title="Разобрать чужой ролик и сделать по нему основу">🎬 По образцу</button>
+          <button class="link-btn" id="sampleBtn">Вставить пример</button>
+        </div>
       </div>
       <label class="field">
         <span>Заголовок-хук сверху <em>(необязательно)</em></span>
@@ -474,6 +477,65 @@
     <div class="dialog-actions">
       <span class="grow"></span>
       <button class="btn secondary" id="phoneClose">Закрыть</button>
+    </div>
+  </div>
+</dialog>
+
+<!-- По образцу -->
+<dialog id="refDialog">
+  <div class="dialog-body">
+    <h2>Похожее видео по образцу</h2>
+    <div id="refForm">
+      <p class="hint">Студия разберёт чужой ролик: где меняются кадры, что в них показано, что и в каком темпе говорит диктор. По этой схеме она сделает основу для вашего — текст, кадры для нейросети и темп голоса. Дальше всё правится как обычно.</p>
+      <label class="field">
+        <span>Ссылка на ролик</span>
+        <input type="text" id="refUrl" inputmode="url" autocomplete="off" placeholder="https://www.tiktok.com/@…/video/…">
+        <small class="hint">TikTok, YouTube Shorts, VK. Instagram часто не отдаёт видео без входа — тогда загрузите файлом.</small>
+      </label>
+      <div class="ref-file">
+        <span class="hint">или</span>
+        <button type="button" class="btn secondary" id="refPick">Загрузить видео</button>
+        <span class="hint" id="refFileName"></span>
+        <input type="file" id="refFile" accept="video/*" hidden>
+      </div>
+      <label class="field">
+        <span>О чём ваш ролик <em>(необязательно)</em></span>
+        <input type="text" id="refTopic" maxlength="500" placeholder="Например: Telegram-бот, который сохраняет удалённые сообщения">
+        <small class="hint">Заполните — и структура с темпом будут как в образце, а содержание про ваше. Оставьте пустым — та же тема своими словами.</small>
+      </label>
+      <div class="row">
+        <label class="field grow">
+          <span>Текст</span>
+          <select id="refMode">
+            <option value="adapt">Написать заново</option>
+            <option value="exact">Слова диктора как есть</option>
+          </select>
+        </label>
+        <label class="field grow">
+          <span>Язык озвучки</span>
+          <select id="refLang">
+            <option value="ru">Русский</option>
+            <option value="same">Как в образце</option>
+            <option value="en">English</option>
+            <option value="uk">Українська</option>
+            <option value="kk">Қазақша</option>
+          </select>
+        </label>
+      </div>
+      <p class="job-error" id="refError" hidden></p>
+    </div>
+    <div id="refProgress" hidden>
+      <p id="refStage">Подготовка…</p>
+      <div class="progress"><div id="refBar"></div></div>
+      <p class="hint">Обычно 1–3 минуты. Окно можно закрыть — разбор продолжится, а результат будет ждать здесь.</p>
+    </div>
+    <div id="refResult" hidden></div>
+    <div class="dialog-actions">
+      <button type="button" class="btn ghost" id="refAgain" hidden>Другой образец</button>
+      <span class="grow"></span>
+      <button type="button" class="btn secondary" id="refClose">Закрыть</button>
+      <button type="button" class="btn primary" id="refStart">Разобрать образец</button>
+      <button type="button" class="btn primary" id="refApply" hidden>Применить к проекту</button>
     </div>
   </div>
 </dialog>
