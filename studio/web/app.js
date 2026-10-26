@@ -1056,6 +1056,8 @@ function setupSettings() {
 // ------------------------------------------------------------------ телефон
 
 const SERVER_GUIDE = "https://github.com/gytfel/Tiktok/blob/main/deploy/README.md";
+// Студия на сервере — отдельная копия со своей ссылкой; туннель с этого компьютера ей не нужен.
+const SERVER_NOTE = `<div class="server-note"><b>Уже поставили студию на сервер?</b> Тогда туннель не нужен, и запускать студию на компьютере тоже не нужно. У сервера своя ссылка: подключитесь к нему (<code>ssh root@IP-сервера</code>), выполните <code>sudo tiktok-studio info</code> и откройте показанную ссылку на телефоне или отсканируйте QR-код.</div>`;
 
 async function openPhone() {
   $("#phoneDialog").showModal();
@@ -1093,6 +1095,7 @@ async function refreshTunnel() {
   if (t.state === "off") {
     box.innerHTML = `<p class="hint">Студия получит временную защищённую ссылку через бесплатный сервис Cloudflare — её можно открыть с телефона где угодно. Компьютер со студией при этом должен быть включён. В первый раз скачается программа cloudflared (~40 МБ).</p>
       <p class="hint">В России многие провайдеры ограничивают Cloudflare, и этот способ может не сработать. Надёжнее — <a href="${SERVER_GUIDE}" target="_blank" rel="noopener">студия на сервере</a>.</p>
+      ${SERVER_NOTE}
       <button class="btn primary" data-tunnel="start">Включить доступ из интернета</button>`;
   } else if (t.state === "downloading") {
     box.innerHTML = `<p>Скачиваю cloudflared… ${t.progress}%</p><div class="progress"><div style="width:${t.progress}%"></div></div>
@@ -1113,6 +1116,7 @@ async function refreshTunnel() {
       <button class="btn secondary" data-tunnel="stop">Выключить доступ из интернета</button>`;
   } else {
     box.innerHTML = `<p class="job-error">${esc(t.error || "Не удалось включить доступ")}</p>
+      ${SERVER_NOTE}
       <p class="hint"><b>Что можно сделать:</b></p>
       <ol class="phone-steps">
         <li>Поставить студию на сервер (VPS) — тогда она открывается с телефона через любой интернет без Cloudflare и работает, даже когда компьютер выключен. <a href="${SERVER_GUIDE}" target="_blank" rel="noopener">Инструкция</a></li>

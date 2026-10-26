@@ -24,6 +24,8 @@ info() {
   printf '  Ссылка для телефона:  %s/?key=%s\n' "$url" "$key"
   printf '  Адрес:                %s\n' "$url"
   printf '  Код доступа:          %s\n\n' "$key"
+  printf 'Откройте эту ссылку на телефоне — подойдёт любой интернет. Студию на компьютере\n'
+  printf 'и кнопку 📱 в ней для этого не используйте: у сервера своя ссылка, туннель не нужен.\n\n'
   printf 'Отсканируйте QR-код камерой телефона:\n\n'
   py -c "import segno, sys; segno.make(sys.argv[1], error='m').terminal(compact=True)" "$url/?key=$key" || true
   cat <<'EOF'
