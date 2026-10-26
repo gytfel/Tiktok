@@ -239,6 +239,7 @@ function updateStats() {
 
 function voiceGroup(v) {
   if (v.id.startsWith("system:")) return "system";
+  if (v.id.startsWith("piper:")) return "piper";
   if (/Multilingual/i.test(v.id)) return "multi";
   return (v.locale || "").split("-")[0].toLowerCase();
 }
@@ -277,6 +278,7 @@ async function loadVoices() {
   try {
     const data = await api("/api/voices");
     state.voices = data.voices;
+    $('#voiceLang option[value="piper"]').hidden = !data.voices.some((v) => v.id.startsWith("piper:"));
     $("#voiceHint").textContent = data.source === "fallback"
       ? "Нет связи с каталогом голосов — показаны основные. Для озвучки нужен интернет."
       : `Доступно голосов: ${data.voices.length}`;
@@ -925,6 +927,7 @@ async function pollJob() {
     $("#resultBox").hidden = false;
     showVideo(r.url);
     toast(`Видео готово: ${fmtDuration(r.duration)}, собрано за ${r.render_seconds} с`);
+    if (r.note) toast(r.note, "info", 15000);
     loadVideos();
     if (r.ai_scenes) {
       state.project.background.ai_scenes = r.ai_scenes;

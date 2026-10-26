@@ -227,6 +227,10 @@ if ! run_as "$VENV/bin/python" -c 'import sys; from studio.ffmpeg_utils import c
 fi
 # Код доступа создаётся один раз и хранится в $DATA_DIR/settings.json (его покажет «tiktok-studio info»).
 run_as "$VENV/bin/python" -c 'from studio import phone; phone.access_key()'
+# Голоса Piper — озвучка без Microsoft: адресам серверов Microsoft часто не отдаёт звук.
+say "Скачиваю русские голоса Piper (запасная озвучка, ~130 МБ)…"
+run_as "$VENV/bin/python" -c 'from studio import tts; [tts.piper_model(c) for c in ("ru_RU-dmitri-medium", "ru_RU-irina-medium")]' \
+  || warn "Голоса Piper не скачались — студия скачает их при первой озвучке."
 
 # ------------------------------------------------------------------ адрес
 

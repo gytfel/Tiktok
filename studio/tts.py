@@ -1,18 +1,22 @@
 """Озвучка текста.
 
 Основной движок — нейроголоса Microsoft Edge (пакет edge-tts): бесплатно, без ключей,
-отдаёт тайминг каждого слова для точных субтитров. Запасной движок — системные голоса
-(Windows SAPI и т.п.) через pyttsx3, работает без интернета.
+отдаёт тайминг каждого слова для точных субтитров. Запасные движки работают без интернета:
+нейроголоса Piper (на сервере — там Microsoft часто не отдаёт озвучку адресам
+дата-центров) и системные голоса Windows через pyttsx3.
 """
 
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import json
 import re
 import subprocess
 import sys
+import threading
 import time
+import wave
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -46,13 +50,16 @@ DEFAULT_VOICE = "ru-RU-DmitryNeural"
 
 
 class TTSError(RuntimeError):
-    pass
+    def __init__(self, message: str, blocked: bool = False):
+        super().__init__(message)
+        self.blocked = blocked  # Microsoft не отдаёт звук этому адресу — поможет голос Piper
 
 
 @dataclass
 class TTSResult:
     audio_path: Path
     boundaries: list[Boundary] = field(default_factory=list)
+    note: str = ""  # что стоит сказать пользователю (например, что взят запасной голос)
 
 
 def _fmt_rate(percent: int) -> str:
@@ -78,6 +85,7 @@ def voice_language_problem(text: str, voice: str) -> str | None:
     """Сообщение, если выбранный голос не сможет прочитать текст на этом языке."""
     if not voice or voice.startswith("system:") or "multilingual" in voice.lower():
         return None
+    voice = voice.removeprefix("piper:").replace("_", "-")
     letters = [c for c in text if c.isalpha()]
     if not letters:
         return None
@@ -170,8 +178,16 @@ def _edge_chunk(text: str, voice: str, rate: int, pitch: int, volume: int, attem
         raise TTSError(
             f"Microsoft не прислал звук для фразы «{phrase}» (голос {voice}), хотя связь есть. Обычно это "
             "временный сбой сервиса, иногда — слово или символ, который голос не может произнести. "
-            "Попробуйте нажать «Создать видео» ещё раз через минуту, выбрать другой голос "
-            "или убрать из этой фразы необычные символы."
+            "На сервере так бывает постоянно: Microsoft не отдаёт озвучку адресам дата-центров — "
+            "тогда выберите голос Piper (язык «Piper — без Microsoft»). "
+            "Ещё можно нажать «Создать видео» через минуту или убрать из этой фразы необычные символы.",
+            blocked=True,
+        )
+    if "403" in str(last_exc):  # Microsoft отказал в подключении — обычно из-за адреса
+        raise TTSError(
+            "Microsoft отказал в озвучке (ошибка 403). Обычно так бывает с адресами серверов и VPN. "
+            "Выберите голос Piper (язык «Piper — без Microsoft») или укажите прокси в настройках.",
+            blocked=True,
         )
     raise TTSError(
         "Не удалось связаться с сервисом озвучки Microsoft. Проверьте интернет "
@@ -276,14 +292,123 @@ def offline_synthesize(text: str, voice: str, rate: int, out_path: Path) -> TTSR
     return TTSResult(out_path, [])
 
 
+# ---------------------------------------------------------------- Piper (без Microsoft)
+
+# Нейроголоса Piper звучат проще голосов Edge, но работают прямо на компьютере или
+# сервере. Модель голоса (~60 МБ) скачивается при первом использовании.
+PIPER_VOICES = [
+    {"id": "piper:ru_RU-dmitri-medium", "name": "Дмитрий (Piper)", "locale": "ru-RU", "gender": "Male"},
+    {"id": "piper:ru_RU-irina-medium", "name": "Ирина (Piper)", "locale": "ru-RU", "gender": "Female"},
+    {"id": "piper:ru_RU-denis-medium", "name": "Денис (Piper)", "locale": "ru-RU", "gender": "Male"},
+    {"id": "piper:ru_RU-ruslan-medium", "name": "Руслан (Piper)", "locale": "ru-RU", "gender": "Male"},
+    {"id": "piper:uk_UA-ukrainian_tts-medium", "name": "Українська (Piper)", "locale": "uk-UA", "gender": "Female"},
+    {"id": "piper:kk_KZ-issai-high", "name": "Қазақша (Piper)", "locale": "kk-KZ", "gender": "Female"},
+    {"id": "piper:en_US-ryan-high", "name": "Ryan (Piper)", "locale": "en-US", "gender": "Male"},
+    {"id": "piper:en_US-amy-medium", "name": "Amy (Piper)", "locale": "en-US", "gender": "Female"},
+]
+PIPER_URL = (
+    "https://huggingface.co/rhasspy/piper-voices/resolve/main/"
+    "{family}/{code}/{name}/{quality}/{code}-{name}-{quality}{ext}?download=true"
+)
+_piper_loaded: dict[str, object] = {}
+_piper_lock = threading.Lock()
+
+
+def piper_available() -> bool:
+    return importlib.util.find_spec("piper") is not None
+
+
+def piper_list_voices() -> list[dict]:
+    return [dict(v) for v in PIPER_VOICES] if piper_available() else []
+
+
+def piper_model(code: str) -> Path:
+    """Путь к модели голоса; при первом обращении скачивает её с HuggingFace."""
+    if not re.fullmatch(r"[a-z]{2}_[A-Z]{2}-[\w]+-(?:x_low|low|medium|high)", code):
+        raise TTSError(f"Неизвестный голос Piper: {code}")
+    folder = config.CACHE_DIR / "piper"
+    model = folder / f"{code}.onnx"
+    if model.exists() and Path(f"{model}.json").exists():
+        return model
+    from .net import USER_AGENT, opener
+    import urllib.request
+
+    lang, name, quality = code.split("-", 2)
+    folder.mkdir(parents=True, exist_ok=True)
+    for ext in (".onnx.json", ".onnx"):
+        url = PIPER_URL.format(family=lang.split("_")[0], code=lang, name=name, quality=quality, ext=ext)
+        target = folder / f"{code}{ext}"
+        part = target.with_name(target.name + ".part")
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+            with opener().open(req, timeout=120) as resp, open(part, "wb") as out:
+                while chunk := resp.read(1024 * 1024):
+                    out.write(chunk)
+            part.replace(target)
+        except OSError as exc:
+            part.unlink(missing_ok=True)
+            if config.is_disk_full(exc):
+                raise TTSError(config.disk_full_message()) from exc
+            raise TTSError(f"Не удалось скачать голос Piper ({code}) с huggingface.co: {exc}") from exc
+    return model
+
+
+def piper_synthesize(text: str, code: str, rate: int, volume: int, out_path: Path) -> TTSResult:
+    if not piper_available():
+        raise TTSError("Голоса Piper не установлены (нужен пакет piper-tts) — выберите голос Microsoft.")
+    from piper import PiperVoice, SynthesisConfig
+
+    model = piper_model(code)
+    with _piper_lock:  # загрузка модели — секунды, держим её в памяти
+        voice = _piper_loaded.get(code)
+        if voice is None:
+            try:
+                voice = _piper_loaded[code] = PiperVoice.load(model)
+            except Exception as exc:  # битая или недокачанная модель — скачаем заново в следующий раз
+                model.unlink(missing_ok=True)
+                raise TTSError(f"Не удалось открыть голос Piper ({code}): {exc}") from exc
+    cfg = SynthesisConfig(length_scale=1.0 / max(0.5, 1 + rate / 100), volume=max(0.2, 1 + volume / 100))
+    with wave.open(str(out_path), "wb") as wav:
+        voice.synthesize_wav(text, wav, syn_config=cfg)
+    if not out_path.exists() or out_path.stat().st_size < 1000:
+        raise TTSError("Голос Piper не создал звук")
+    return TTSResult(out_path, [])
+
+
+def piper_fallback(voice: str) -> dict | None:
+    """Голос Piper на том же языке и, если есть, того же пола, что и голос Edge."""
+    lang = voice.split("-")[0].lower()
+    known = {v["id"]: v.get("gender") for v in FALLBACK_VOICES}
+    gender = known.get(voice) or ("Female" if re.search(r"(Svetlana|Dariya|Polina|Aigul|Ava|Emma|Jenny|Aria)", voice) else "Male")
+    same_lang = [v for v in piper_list_voices() if v["locale"].split("-")[0].lower() == lang]
+    return next((v for v in same_lang if v["gender"] == gender), same_lang[0] if same_lang else None)
+
 # --------------------------------------------------------------- Общий API
 
 
-def synthesize(text: str, voice: str, rate: int, pitch: int, volume: int, out_dir: Path) -> TTSResult:
+def synthesize(text: str, voice: str, rate: int, pitch: int, volume: int, out_dir: Path,
+               allow_fallback: bool = True) -> TTSResult:
     out_dir.mkdir(parents=True, exist_ok=True)
     if voice.startswith("system:"):
         return offline_synthesize(text, voice[len("system:"):], rate, out_dir / "voice.wav")
-    return edge_synthesize(text, voice or DEFAULT_VOICE, rate, pitch, volume, out_dir / "voice.mp3")
+    if voice.startswith("piper:"):
+        return piper_synthesize(text, voice[len("piper:"):], rate, volume, out_dir / "voice.wav")
+    try:
+        return edge_synthesize(text, voice or DEFAULT_VOICE, rate, pitch, volume, out_dir / "voice.mp3")
+    except TTSError as exc:
+        fallback = piper_fallback(voice or DEFAULT_VOICE) if exc.blocked and allow_fallback else None
+        if fallback is None:
+            raise
+        try:
+            result = piper_synthesize(text, fallback["id"][len("piper:"):], rate, volume, out_dir / "voice.wav")
+        except TTSError:
+            raise exc from None
+        result.note = (
+            f"Microsoft не прислал озвучку (с адресами серверов так бывает постоянно), поэтому ролик озвучен "
+            f"голосом {fallback['name']}. Чтобы не ждать каждый раз, выберите на вкладке «Голос» язык "
+            "«Piper — без Microsoft»."
+        )
+        return result
 
 
 _VOICES_CACHE = config.CACHE_DIR / "voices.json"

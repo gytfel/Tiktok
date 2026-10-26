@@ -140,6 +140,9 @@ def render(project: dict, ctx: RenderContext, synthesize: Callable | None = None
     ctx.log(f"Голос: {v['voice']}, скорость {v['rate']:+d}%, тон {v['pitch']:+d}Hz")
     result = synthesize(text, v["voice"], v["rate"], v["pitch"], v["volume"], ctx.job_dir)
     ctx.check_cancel()
+    note = getattr(result, "note", "")
+    if note:
+        ctx.log(note)
     speech = media_duration(result.audio_path)
     ctx.log(f"Длительность озвучки: {speech:.2f} c, меток слов: {len(result.boundaries)}")
 
@@ -283,6 +286,8 @@ def render(project: dict, ctx: RenderContext, synthesize: Callable | None = None
     ctx.log(f"Готово: {final.name} ({total:.1f} c) за {meta['render_seconds']} c")
     (ctx.job_dir / "project.json").write_text(json.dumps(p, ensure_ascii=False, indent=2), encoding="utf-8")
     out = library.public_output(meta)
+    if note:
+        out["note"] = note
     if b["type"] == "ai":
         out["ai_scenes"] = b["ai_scenes"]
     return out

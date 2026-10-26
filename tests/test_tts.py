@@ -99,3 +99,130 @@ def test_voice_language_problem(voice, ok):
 def test_render_rejects_english_voice_for_russian_text_before_tts():
     with pytest.raises(RenderError, match="не умеет читать русский"):
         check_sources(normalize({"text": "Привет, это ролик", "voice": {"voice": "en-US-GuyNeural"}}))
+
+
+# ---------------------------------------------------------------- Piper
+
+
+def fake_piper(monkeypatch, calls):
+    """Пакет piper: модель «говорит» по 100 мс тишины на символ."""
+    import sys
+    import types
+
+    class SynthesisConfig:
+        def __init__(self, **kw):
+            self.kw = kw
+
+    class Voice:
+        def synthesize_wav(self, text, wav, syn_config=None):
+            calls.append(("say", text, syn_config.kw))
+            wav.setnchannels(1)
+            wav.setsampwidth(2)
+            wav.setframerate(22050)
+            wav.writeframes(b"\x00\x00" * 2205 * len(text))
+
+    class PiperVoice:
+        @staticmethod
+        def load(path):
+            calls.append(("load", str(path)))
+            return Voice()
+
+    monkeypatch.setitem(sys.modules, "piper", types.SimpleNamespace(PiperVoice=PiperVoice, SynthesisConfig=SynthesisConfig))
+    monkeypatch.setattr(tts, "piper_available", lambda: True)
+    monkeypatch.setattr(tts, "_piper_loaded", {})
+
+
+@pytest.fixture
+def piper_cache(tmp_path, monkeypatch):
+    from studio import config
+
+    monkeypatch.setattr(config, "CACHE_DIR", tmp_path / "cache")
+    folder = tmp_path / "cache" / "piper"
+    folder.mkdir(parents=True)
+    for v in tts.PIPER_VOICES:
+        code = v["id"].removeprefix("piper:")
+        (folder / f"{code}.onnx").write_bytes(b"model")
+        (folder / f"{code}.onnx.json").write_text("{}")
+    return folder
+
+
+def test_piper_voice_is_used_directly_with_rate_and_cached(tmp_path, monkeypatch, piper_cache):
+    calls = []
+    fake_piper(monkeypatch, calls)
+    res = tts.synthesize("Привет мир", "piper:ru_RU-irina-medium", 25, 0, 0, tmp_path / "a")
+    tts.synthesize("Ещё раз", "piper:ru_RU-irina-medium", 0, 0, 0, tmp_path / "b")
+    assert res.audio_path.suffix == ".wav" and res.boundaries == [] and res.note == ""
+    assert [c[0] for c in calls] == ["load", "say", "say"]  # модель загружена один раз
+    assert calls[1][2]["length_scale"] == pytest.approx(0.8)  # +25% скорости
+
+
+def test_blocked_edge_falls_back_to_piper_same_gender(tmp_path, monkeypatch, piper_cache):
+    calls = []
+    fake_piper(monkeypatch, calls)
+
+    def blocked(*a, **kw):
+        raise tts.TTSError("нет звука", blocked=True)
+
+    monkeypatch.setattr(tts, "edge_synthesize", blocked)
+    res = tts.synthesize("Привет", "ru-RU-SvetlanaNeural", 0, 0, 0, tmp_path)
+    assert "ru_RU-irina-medium" in calls[0][1] and "Ирина (Piper)" in res.note
+    with pytest.raises(tts.TTSError):  # прослушивание голоса — без подмены
+        tts.synthesize("Привет", "ru-RU-SvetlanaNeural", 0, 0, 0, tmp_path, allow_fallback=False)
+
+
+def test_network_errors_do_not_switch_to_piper(tmp_path, monkeypatch, piper_cache):
+    fake_piper(monkeypatch, [])
+
+    def offline(*a, **kw):
+        raise tts.TTSError("Не удалось связаться с сервисом")
+
+    monkeypatch.setattr(tts, "edge_synthesize", offline)
+    with pytest.raises(tts.TTSError, match="связаться"):
+        tts.synthesize("Привет", "ru-RU-DmitryNeural", 0, 0, 0, tmp_path)
+
+
+def test_persistent_no_audio_is_marked_blocked(tmp_path, monkeypatch):
+    stream, _ = fake_stream({"Раз два.": 99})
+    monkeypatch.setattr(tts, "_edge_stream", stream)
+    with pytest.raises(tts.TTSError) as err:
+        tts.edge_synthesize("Раз два.", "ru-RU-DmitryNeural", 0, 0, 0, tmp_path / "v.mp3", attempts=2)
+    assert err.value.blocked and "Piper" in str(err.value)
+
+
+def test_piper_model_download(tmp_path, monkeypatch):
+    import io
+
+    from studio import config, net
+
+    monkeypatch.setattr(config, "CACHE_DIR", tmp_path / "cache")
+    urls = []
+
+    class Opener:
+        def open(self, req, timeout=0):
+            urls.append(req.full_url)
+            if "broken" in req.full_url:
+                raise OSError("connection reset")
+            body = io.BytesIO(b"{}" if req.full_url.split("?")[0].endswith(".json") else b"onnx")
+            body.__enter__ = lambda: body
+            return body
+
+    monkeypatch.setattr(net, "opener", lambda: Opener())
+    model = tts.piper_model("uk_UA-ukrainian_tts-medium")
+    assert model.read_bytes() == b"onnx" and model.with_suffix(".onnx.json").read_bytes() == b"{}"
+    assert urls[1] == (
+        "https://huggingface.co/rhasspy/piper-voices/resolve/main/uk/uk_UA/ukrainian_tts/medium/"
+        "uk_UA-ukrainian_tts-medium.onnx?download=true"
+    )
+    with pytest.raises(tts.TTSError):
+        tts.piper_model("../../etc-passwd-x")
+
+
+def test_piper_fallback_and_language_checks(monkeypatch):
+    monkeypatch.setattr(tts, "piper_available", lambda: True)
+    assert tts.piper_fallback("ru-RU-DmitryNeural")["id"] == "piper:ru_RU-dmitri-medium"
+    assert tts.piper_fallback("en-US-AvaMultilingualNeural")["id"] == "piper:en_US-amy-medium"
+    assert tts.piper_fallback("de-DE-ConradNeural") is None
+    assert tts.voice_language_problem("Привет, мир", "piper:ru_RU-dmitri-medium") is None
+    assert tts.voice_language_problem("Привет, мир", "piper:en_US-ryan-high")
+    monkeypatch.setattr(tts, "piper_available", lambda: False)
+    assert tts.piper_list_voices() == [] and tts.piper_fallback("ru-RU-DmitryNeural") is None

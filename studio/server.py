@@ -181,6 +181,7 @@ def voices(refresh: bool = False) -> dict:
     data = tts.list_voices(force=refresh)
     if importlib.util.find_spec("pyttsx3") is not None:
         data["voices"] = data["voices"] + tts.list_offline_voices()
+    data["voices"] = data["voices"] + tts.piper_list_voices()
     return data
 
 
@@ -200,7 +201,8 @@ def voice_preview(payload: dict = Body(...)) -> FileResponse:
             return FileResponse(cached, media_type=media)
     with tempfile.TemporaryDirectory(dir=config.CACHE_DIR) as tmp:
         try:
-            res = tts.synthesize(text, p["voice"], p["rate"], p["pitch"], p["volume"], Path(tmp))
+            # Без подмены голоса: в прослушивании должен звучать именно выбранный.
+            res = tts.synthesize(text, p["voice"], p["rate"], p["pitch"], p["volume"], Path(tmp), allow_fallback=False)
         except tts.TTSError as exc:
             raise HTTPException(502, str(exc)) from exc
         target = cache / f"{key}{res.audio_path.suffix}"

@@ -542,8 +542,8 @@ def write_script(provider: ai.Provider, brief: str, n: int, lang: str, mode: str
 
 def pick_voice(lang: str, current: str) -> str:
     """Голос для языка ролика: текущий, если он подходит, иначе того же пола на нужном языке."""
-    if current.lower().startswith(lang.lower() + "-"):
-        return current
+    if current.removeprefix("piper:").replace("_", "-").lower().startswith(lang.lower() + "-"):
+        return current  # и голос Piper на нужном языке оставляем
     try:
         voices = tts.list_voices()["voices"]
     except Exception:
