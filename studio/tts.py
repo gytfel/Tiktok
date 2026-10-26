@@ -368,8 +368,18 @@ def piper_synthesize(text: str, code: str, rate: int, volume: int, out_path: Pat
                 model.unlink(missing_ok=True)
                 raise TTSError(f"Не удалось открыть голос Piper ({code}): {exc}") from exc
     cfg = SynthesisConfig(length_scale=1.0 / max(0.5, 1 + rate / 100), volume=max(0.2, 1 + volume / 100))
-    with wave.open(str(out_path), "wb") as wav:
+    wav = wave.open(str(out_path), "wb")
+    try:
         voice.synthesize_wav(text, wav, syn_config=cfg)
+        wav.close()
+    except Exception as exc:  # ошибка внутри модели (onnxruntime) или нехватка памяти
+        try:
+            wav.close()  # у пустого файла close() падает своей ошибкой — она скрыла бы настоящую
+        except Exception:
+            pass
+        if config.is_disk_full(exc):
+            raise TTSError(config.disk_full_message()) from exc
+        raise TTSError(f"Голос Piper не смог озвучить текст: {type(exc).__name__}: {exc}") from exc
     if not out_path.exists() or out_path.stat().st_size < 1000:
         raise TTSError("Голос Piper не создал звук")
     return TTSResult(out_path, [])
@@ -396,13 +406,17 @@ def synthesize(text: str, voice: str, rate: int, pitch: int, volume: int, out_di
     try:
         return edge_synthesize(text, voice or DEFAULT_VOICE, rate, pitch, volume, out_dir / "voice.mp3")
     except TTSError as exc:
-        fallback = piper_fallback(voice or DEFAULT_VOICE) if exc.blocked and allow_fallback else None
-        if fallback is None:
+        if not (exc.blocked and allow_fallback):
             raise
+        fallback = piper_fallback(voice or DEFAULT_VOICE)
+        if fallback is None:
+            if piper_available():
+                raise
+            raise TTSError(f"{exc}\n\nЗапасные голоса Piper не установлены. На сервере выполните: sudo tiktok-studio update") from None
         try:
             result = piper_synthesize(text, fallback["id"][len("piper:"):], rate, volume, out_dir / "voice.wav")
-        except TTSError:
-            raise exc from None
+        except TTSError as piper_exc:  # показываем обе причины, иначе непонятно, почему не выручил Piper
+            raise TTSError(f"{exc}\n\nЗапасной голос Piper тоже не сработал: {piper_exc}") from None
         result.note = (
             f"Microsoft не прислал озвучку (с адресами серверов так бывает постоянно), поэтому ролик озвучен "
             f"голосом {fallback['name']}. Чтобы не ждать каждый раз, выберите на вкладке «Голос» язык "

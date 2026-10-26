@@ -226,3 +226,40 @@ def test_piper_fallback_and_language_checks(monkeypatch):
     assert tts.voice_language_problem("Привет, мир", "piper:en_US-ryan-high")
     monkeypatch.setattr(tts, "piper_available", lambda: False)
     assert tts.piper_list_voices() == [] and tts.piper_fallback("ru-RU-DmitryNeural") is None
+
+
+def test_failed_piper_fallback_shows_both_reasons(tmp_path, monkeypatch):
+    monkeypatch.setattr(tts, "piper_available", lambda: True)
+
+    def blocked(*a, **kw):
+        raise tts.TTSError("Microsoft не прислал звук", blocked=True)
+
+    def piper_broken(*a, **kw):
+        raise tts.TTSError("Не удалось скачать голос Piper (ru_RU-dmitri-medium) с huggingface.co: 403")
+
+    monkeypatch.setattr(tts, "edge_synthesize", blocked)
+    monkeypatch.setattr(tts, "piper_synthesize", piper_broken)
+    with pytest.raises(tts.TTSError) as err:
+        tts.synthesize("Привет", "ru-RU-DmitryNeural", 0, 0, 0, tmp_path)
+    assert "Microsoft не прислал звук" in str(err.value) and "Piper тоже не сработал" in str(err.value)
+    assert "huggingface.co: 403" in str(err.value)
+
+    monkeypatch.setattr(tts, "piper_available", lambda: False)
+    with pytest.raises(tts.TTSError, match="не установлены"):
+        tts.synthesize("Привет", "ru-RU-DmitryNeural", 0, 0, 0, tmp_path)
+
+
+def test_piper_model_errors_become_tts_errors(tmp_path, monkeypatch, piper_cache):
+    import sys
+    import types
+
+    class Voice:
+        def synthesize_wav(self, text, wav, syn_config=None):
+            raise RuntimeError("onnxruntime: out of memory")
+
+    monkeypatch.setitem(sys.modules, "piper", types.SimpleNamespace(
+        PiperVoice=types.SimpleNamespace(load=lambda path: Voice()), SynthesisConfig=lambda **kw: kw))
+    monkeypatch.setattr(tts, "piper_available", lambda: True)
+    monkeypatch.setattr(tts, "_piper_loaded", {})
+    with pytest.raises(tts.TTSError, match="RuntimeError: onnxruntime"):
+        tts.piper_synthesize("Привет", "ru_RU-dmitri-medium", 0, 0, tmp_path / "v.wav")

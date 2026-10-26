@@ -272,16 +272,28 @@ doctor() {
   if [ "${free_mb:-0}" -ge 1000 ]; then ok "свободно на диске: ${free_mb} МБ"
   else bad "на диске осталось ${free_mb} МБ — удалите старые ролики в студии"; fi
 
-  # Microsoft часто не отдаёт озвучку адресам серверов — тогда выручают голоса Piper.
+  # Озвучка: Microsoft часто не отдаёт звук адресам серверов — тогда выручают голоса Piper
+  # (пакет, модель с huggingface.co и сама озвучка проверяются целиком).
+  local piper_err piper_ok=""
+  if piper_err="$(py -c 'import pathlib, tempfile
+from studio import tts
+tts.piper_synthesize("Проверка связи.", "ru_RU-dmitri-medium", 0, 0, pathlib.Path(tempfile.mkdtemp()) / "t.wav")' 2>&1)"; then
+    piper_ok=1
+  fi
   if py -c 'import pathlib, tempfile
 from studio import tts
 tts.edge_synthesize("Проверка связи.", "ru-RU-DmitryNeural", 0, 0, 0, pathlib.Path(tempfile.mkdtemp()) / "t.mp3", attempts=2)' >/dev/null 2>&1; then
     ok "озвучка Microsoft работает"
-  elif py -c 'import sys; from studio import tts; sys.exit(0 if tts.piper_available() else 1)' >/dev/null 2>&1; then
+  elif [ -n "$piper_ok" ]; then
     note "Microsoft не отдаёт озвучку этому серверу — ролики озвучиваются голосами Piper.
       Чтобы не ждать проверку каждый раз, выберите на вкладке «Голос» язык «Piper — без Microsoft»."
   else
-    bad "Microsoft не отдаёт озвучку, а голосов Piper нет → sudo tiktok-studio update"
+    bad "Microsoft не отдаёт озвучку этому серверу, а запасной голос Piper не работает (причина ниже)"
+  fi
+  if [ -n "$piper_ok" ]; then
+    ok "голос Piper работает"
+  else
+    bad "голос Piper не работает: $(printf '%s' "$piper_err" | grep -v '^\s' | tail -1)"
   fi
 
   if [ "$problems" -eq 0 ]; then
