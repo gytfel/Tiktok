@@ -263,3 +263,47 @@ def test_piper_model_errors_become_tts_errors(tmp_path, monkeypatch, piper_cache
     monkeypatch.setattr(tts, "_piper_loaded", {})
     with pytest.raises(tts.TTSError, match="RuntimeError: onnxruntime"):
         tts.piper_synthesize("Привет", "ru_RU-dmitri-medium", 0, 0, tmp_path / "v.wav")
+
+
+def picky_stream(refuse):
+    """Подмена _edge_stream: молчит (NoAudioReceived) для текстов, где refuse(text) — истина."""
+    calls = []
+
+    async def stream(text, voice, rate, pitch, volume):
+        calls.append(text)
+        if refuse(text):
+            raise NoAudioReceived("No audio was received.")
+        words = text.split()
+        data = b"\xff" * int(tts.MP3_BYTES_PER_SECOND * 0.3 * len(words))
+        return data, [Boundary(w, i * 0.3, i * 0.3 + 0.25) for i, w in enumerate(words)]
+
+    return stream, calls
+
+
+def test_one_bad_symbol_is_dropped_instead_of_failing(tmp_path, monkeypatch):
+    stream, calls = picky_stream(lambda t: "‼" in t)
+    monkeypatch.setattr(tts, "_edge_stream", stream)
+    text = "Телеграм бот хранит все сообщения\n\nБот также делает экспорт ‼ быстро."
+    res = tts.edge_synthesize(text, "ru-RU-DmitryNeural", 0, 0, 0, tmp_path / "v.mp3")
+    assert "Проверка связи." in calls  # сначала убедились, что Microsoft вообще работает
+    assert "Бот также делает экспорт быстро." in calls  # затем повторили строку без значка
+    words = [b.text for b in res.boundaries]
+    assert words[:5] == ["Телеграм", "бот", "хранит", "все", "сообщения"] and words[-1] == "быстро."
+    starts = [b.start for b in res.boundaries]
+    assert starts == sorted(starts) and res.boundaries[5].start == pytest.approx(5 * 0.3)
+
+
+def test_blocked_service_is_not_split_into_pieces(tmp_path, monkeypatch):
+    stream, calls = picky_stream(lambda t: True)
+    monkeypatch.setattr(tts, "_edge_stream", stream)
+    with pytest.raises(tts.TTSError) as err:
+        tts.edge_synthesize("Первая строка.\nВторая строка.", "ru-RU-DmitryNeural", 0, 0, 0, tmp_path / "v.mp3", attempts=3)
+    assert err.value.blocked and len(calls) == 4  # 3 попытки + одна проверка связи
+
+
+def test_unpronounceable_phrase_names_it_after_trying_parts(tmp_path, monkeypatch):
+    stream, calls = picky_stream(lambda t: "ужас" in t)
+    monkeypatch.setattr(tts, "_edge_stream", stream)
+    with pytest.raises(tts.TTSError, match="даже по частям") as err:
+        tts.edge_synthesize("Это ужас, правда.", "ru-RU-DmitryNeural", 0, 0, 0, tmp_path / "v.mp3", attempts=1)
+    assert err.value.blocked and "Это ужас," in calls  # пробовали и по запятым

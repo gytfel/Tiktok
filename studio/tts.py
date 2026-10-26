@@ -173,10 +173,9 @@ def _edge_chunk(text: str, voice: str, rate: int, pitch: int, volume: int, attem
             last_exc = exc
         if attempt < attempts - 1:
             time.sleep(min(8.0, 1.5 * 2 ** attempt))
-    phrase = text if len(text) <= 80 else text[:77] + "…"
     if last_exc is not None and (_is_no_audio(last_exc) or isinstance(last_exc, TTSError)):
         raise TTSError(
-            f"Microsoft не прислал звук для фразы «{phrase}» (голос {voice}), хотя связь есть. Обычно это "
+            f"Microsoft не прислал звук для фразы «{_short(text)}» (голос {voice}), хотя связь есть. Обычно это "
             "временный сбой сервиса, иногда — слово или символ, который голос не может произнести. "
             "На сервере так бывает постоянно: Microsoft не отдаёт озвучку адресам дата-центров — "
             "тогда выберите голос Piper (язык «Piper — без Microsoft»). "
@@ -195,6 +194,74 @@ def _edge_chunk(text: str, voice: str, rate: int, pitch: int, volume: int, attem
     )
 
 
+def _short(text: str) -> str:
+    return text if len(text) <= 80 else text[:77] + "…"
+
+
+def _join(parts: list[tuple[bytes, list[Boundary]]]) -> tuple[bytes, list[Boundary]]:
+    """Склеивает MP3-части и сдвигает метки слов на длительность предыдущих частей."""
+    audio = bytearray()
+    boundaries: list[Boundary] = []
+    offset = 0.0
+    for data, part_boundaries in parts:
+        boundaries += [Boundary(b.text, b.start + offset, b.end + offset) for b in part_boundaries]
+        audio += data
+        offset += len(data) / MP3_BYTES_PER_SECOND
+    return bytes(audio), boundaries
+
+
+# Символы, которые голос точно умеет читать; остальное (значки, редкие символы) заменяем пробелом.
+_PLAIN_RE = re.compile(r"[^\w\s.,!?;:…'\"«»()%+\-—–]", re.UNICODE)
+
+
+def _smaller_parts(text: str) -> list[str]:
+    """Части поменьше: строки, затем предложения, затем куски между запятыми."""
+    for pattern in (r"\n+", r"(?<=[.!?…])\s+", r"(?<=[,;:—])\s+"):
+        parts = [p.strip() for p in re.split(pattern, text) if re.search(r"\w", p)]
+        if len(parts) > 1:
+            return parts
+    return []
+
+
+def _service_works(voice: str) -> bool:
+    """Отдаёт ли Microsoft звук вообще — короткой фразой на языке голоса."""
+    probe = "Проверка связи." if voice.split("-")[0].lower() in CYRILLIC_LANGS else "Hello there."
+    try:
+        data, _ = asyncio.run(_edge_stream(probe, voice, 0, 0, 0))
+        return bool(data)
+    except Exception:
+        return False
+
+
+def _edge_piece(text: str, voice: str, rate: int, pitch: int, volume: int, attempts: int,
+                service: dict) -> tuple[bytes, list[Boundary]]:
+    """Часть текста. Если Microsoft не озвучивает именно её (а не всё подряд), она дробится
+    на строки и предложения, а упрямый кусок повторяется без необычных символов."""
+    try:
+        return _edge_chunk(text, voice, rate, pitch, volume, attempts)
+    except TTSError as exc:
+        if not exc.blocked:
+            raise
+        if "works" not in service:
+            service["works"] = _service_works(voice)
+        if not service["works"]:  # звука нет ни для чего — дробить бессмысленно, выручит Piper
+            raise
+        parts = _smaller_parts(text)
+        if parts:
+            return _join([_edge_piece(p, voice, rate, pitch, volume, 2, service) for p in parts])
+        plain = " ".join(_PLAIN_RE.sub(" ", text).split())
+        if plain != text and re.search(r"\w", plain):
+            try:
+                return _edge_chunk(plain, voice, rate, pitch, volume, 2)
+            except TTSError:
+                pass
+        raise TTSError(
+            f"Microsoft не смог озвучить фразу «{_short(text)}» (голос {voice}) даже по частям и без "
+            "необычных символов. Перефразируйте её или выберите голос Piper (язык «Piper — без Microsoft»).",
+            blocked=True,
+        ) from None
+
+
 def edge_synthesize(text: str, voice: str, rate: int, pitch: int, volume: int, out_path: Path, attempts: int = 5) -> TTSResult:
     """Озвучивает текст по частям: сбой сервиса задевает одну короткую часть, и её
     можно повторить, не переозвучивая всё остальное."""
@@ -204,15 +271,9 @@ def edge_synthesize(text: str, voice: str, rate: int, pitch: int, volume: int, o
     chunks = split_for_tts(text)
     if not chunks:
         raise TTSError("В тексте нет слов для озвучки")
-    audio = bytearray()
-    boundaries: list[Boundary] = []
-    offset = 0.0
-    for chunk in chunks:
-        data, chunk_boundaries = _edge_chunk(chunk, voice, rate, pitch, volume, attempts)
-        boundaries += [Boundary(b.text, b.start + offset, b.end + offset) for b in chunk_boundaries]
-        audio += data
-        offset += len(data) / MP3_BYTES_PER_SECOND
-    out_path.write_bytes(bytes(audio))
+    service: dict = {}  # проверка «отдаёт ли Microsoft звук вообще» — одна на весь текст
+    audio, boundaries = _join([_edge_piece(chunk, voice, rate, pitch, volume, attempts, service) for chunk in chunks])
+    out_path.write_bytes(audio)
     return TTSResult(out_path, boundaries)
 
 
