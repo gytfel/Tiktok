@@ -6,7 +6,9 @@ APP_DIR=/opt/tiktok-studio/app
 VENV=/opt/tiktok-studio/venv
 DATA_DIR="${TS_DATA_DIR:-/var/lib/tiktok-studio}"
 SERVICE_USER=tiktokstudio
+PORT=8765
 INSTALLER="https://raw.githubusercontent.com/${TS_REPO:-gytfel/Tiktok}/${TS_BRANCH:-main}/deploy/install.sh"
+MARK="Нужен код доступа"  # так отвечает только студия — по этой фразе видно, что по ссылке именно она
 
 die() { printf 'Ошибка: %s\n' "$*" >&2; exit 1; }
 need_root() { [ "$(id -u)" -eq 0 ] || die "нужны права администратора: sudo tiktok-studio $*"; }
@@ -15,13 +17,42 @@ py() {
   (cd "$APP_DIR" && umask 077 && runuser -u "$SERVICE_USER" -- env HOME="$DATA_DIR" TIKTOK_STUDIO_WORKSPACE="$DATA_DIR" "$VENV/bin/python" "$@")
 }
 
+studio_url() { sed -n 's/^STUDIO_URL=//p' "$DATA_DIR/server.env" 2>/dev/null | head -1; }
+
+# Что отвечает по адресу: studio (студия, HTTPS в порядке), nocert (студия, но сертификата
+# ещё нет), other (другая программа) или none (не отвечает).
+url_state() {
+  if curl -s --max-time 8 "$1/api/status" 2>/dev/null | grep -q "$MARK"; then echo studio; return; fi
+  if curl -sk --max-time 8 "$1/api/status" 2>/dev/null | grep -q "$MARK"; then echo nocert; return; fi
+  if [ "$(curl -sk -o /dev/null -w '%{http_code}' --max-time 8 "$1/" 2>/dev/null || true)" != "000" ]; then
+    echo other
+  else
+    echo none
+  fi
+}
+
+port_users() {
+  ss -Hltnp "sport = :$1" 2>/dev/null | grep -o '("[^"]*",pid=[0-9]*' | sed 's/("\([^"]*\)",pid=\([0-9]*\)/\1 \2/' | sort -u || true
+}
+
+service_of() {
+  grep -q 'user@' "/proc/$1/cgroup" 2>/dev/null && return 0
+  grep -o '[^/]*\.service$' "/proc/$1/cgroup" 2>/dev/null | head -1 || true
+}
+
 info() {
   local url key
-  url="$(sed -n 's/^STUDIO_URL=//p' "$DATA_DIR/server.env" 2>/dev/null | head -1)"
-  key="$(py -c 'from studio import phone; print(phone.access_key())')"
+  url="$(studio_url)"
   [ -n "$url" ] || die "студия не установлена (нет $DATA_DIR/server.env)"
-  printf '\n\033[1;32mTikTok Studio работает.\033[0m\n\n'
-  printf '  Ссылка для телефона:  %s/?key=%s\n' "$url" "$key"
+  key="$(py -c 'from studio import phone; print(phone.access_key())')"
+  case "$(url_state "$url")" in
+    other) printf '\n\033[1;31mВнимание: по адресу %s сейчас открывается другая программа, а не студия.\033[0m\n' "$url"
+           printf 'Выполните sudo tiktok-studio doctor — он покажет, что занимает адрес и как это исправить.\n' ;;
+    none)  printf '\n\033[1;33mВнимание: адрес %s сейчас не отвечает. Проверка: sudo tiktok-studio doctor\033[0m\n' "$url" ;;
+    nocert) printf '\n\033[1;33mСертификат HTTPS ещё не получен — подождите пару минут. Если не пройдёт: sudo tiktok-studio doctor\033[0m\n' ;;
+    *) printf '\n\033[1;32mTikTok Studio работает.\033[0m\n' ;;
+  esac
+  printf '\n  Ссылка для телефона:  %s/?key=%s\n' "$url" "$key"
   printf '  Адрес:                %s\n' "$url"
   printf '  Код доступа:          %s\n\n' "$key"
   printf 'Откройте эту ссылку на телефоне — подойдёт любой интернет. Студию на компьютере\n'
@@ -32,6 +63,7 @@ info() {
 
 Команды:
   sudo tiktok-studio info      показать ссылку, код и QR-код
+  sudo tiktok-studio doctor    проверить, всё ли в порядке, и подсказать, что исправить
   sudo tiktok-studio update    обновить студию (видео и настройки сохранятся)
   sudo tiktok-studio restart   перезапустить
   sudo tiktok-studio logs      журнал работы
@@ -39,10 +71,78 @@ info() {
 EOF
 }
 
+doctor() {
+  local url problems=0 code port name pid unit users free_mb
+  ok()  { printf '  \033[1;32m✔\033[0m %s\n' "$*"; }
+  bad() { printf '  \033[1;31m✖\033[0m %s\n' "$*"; problems=$((problems + 1)); }
+  url="$(studio_url)"
+  printf '\nПроверка TikTok Studio\n\n'
+
+  if [ -d /run/systemd/system ]; then
+    ok "обычный сервер с systemd"
+  else
+    bad "нет systemd — это контейнер или облачная среда, а не обычный VPS. Нужен VPS с чистой Ubuntu 24.04."
+  fi
+
+  if systemctl is-active --quiet tiktok-studio 2>/dev/null; then ok "служба студии работает"
+  else bad "служба студии не работает → sudo tiktok-studio restart, причина — в sudo tiktok-studio logs"; fi
+
+  code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:$PORT/api/status" 2>/dev/null || true)"
+  if [ "$code" = "401" ]; then ok "студия отвечает внутри сервера"
+  else bad "студия не отвечает на 127.0.0.1:$PORT (код ${code:-000}) → sudo tiktok-studio logs"; fi
+
+  if systemctl is-active --quiet caddy 2>/dev/null; then
+    ok "веб-сервер Caddy работает"
+  else
+    bad "веб-сервер Caddy не работает. Последние строки его журнала:"
+    journalctl -u caddy -n 8 --no-pager 2>/dev/null | sed 's/^/      /' || true
+  fi
+
+  for port in 80 443; do
+    users="$(port_users "$port")"
+    if [ -z "$users" ]; then
+      bad "порт $port никто не слушает (его должен слушать Caddy)"
+      continue
+    fi
+    while read -r name pid; do
+      [ -n "$pid" ] || continue
+      if [ "$name" = caddy ]; then
+        ok "порт $port слушает Caddy"
+      else
+        unit="$(service_of "$pid")"
+        bad "порт $port занят программой $name${unit:+ (служба $unit)} — из-за неё по адресу сервера открывается не студия.
+      Если она не нужна: curl -fsSL $INSTALLER | sudo bash -s -- --free-ports"
+      fi
+    done <<< "$users"
+  done
+
+  if [ -n "$url" ]; then
+    case "$(url_state "$url")" in
+      studio) ok "по ссылке $url открывается студия, сертификат HTTPS в порядке" ;;
+      nocert) bad "студия по ссылке $url отвечает, но сертификата HTTPS нет: откройте в панели хостинга входящие TCP 80 и 443, затем sudo tiktok-studio restart" ;;
+      other)  bad "по ссылке $url отвечает другая программа, а не студия. Если выше порты в порядке, адрес занят на стороне хостинга (например, шаблоном с Jupyter) — переустановите сервер на чистую Ubuntu 24.04" ;;
+      none)   bad "ссылка $url не отвечает: откройте в панели хостинга входящие TCP 80 и 443" ;;
+    esac
+  else
+    bad "студия не установлена до конца (нет $DATA_DIR/server.env) — запустите установку ещё раз"
+  fi
+
+  free_mb="$(df -Pm / | awk 'NR==2 {print $4}')"
+  if [ "${free_mb:-0}" -ge 1000 ]; then ok "свободно на диске: ${free_mb} МБ"
+  else bad "на диске осталось ${free_mb} МБ — удалите старые ролики в студии"; fi
+
+  if [ "$problems" -eq 0 ]; then
+    printf '\nВсё в порядке. Если на телефоне ссылка всё равно не открывается — проверьте в панели\nхостинга, что открыты входящие TCP 80 и 443 (эта проверка идёт изнутри сервера).\n\n'
+  else
+    printf '\nНайдено проблем: %s. Исправьте их по подсказкам выше и запустите проверку ещё раз.\n\n' "$problems"
+  fi
+}
+
 cmd="${1:-help}"
 case "$cmd" in
   info) need_root "$cmd"; info ;;
-  update) need_root "$cmd"; curl -fsSL "$INSTALLER" | bash ;;
+  doctor|check) need_root "$cmd"; doctor ;;
+  update) need_root "$cmd"; shift; curl -fsSL "$INSTALLER" | bash -s -- "$@" ;;
   restart) need_root "$cmd"; systemctl restart tiktok-studio; systemctl restart caddy 2>/dev/null || true; echo "Перезапущено." ;;
   logs) need_root "$cmd"; journalctl -u tiktok-studio -n "${2:-100}" --no-pager ;;
   status) need_root "$cmd"; systemctl --no-pager status tiktok-studio caddy | head -40 ;;
@@ -55,7 +155,9 @@ case "$cmd" in
     cat <<'EOF'
 Команды:
   sudo tiktok-studio info      показать ссылку, код и QR-код
-  sudo tiktok-studio update    обновить студию (видео и настройки сохранятся)
+  sudo tiktok-studio doctor    проверить, всё ли в порядке, и подсказать, что исправить
+  sudo tiktok-studio update    обновить студию (видео и настройки сохранятся);
+                               update --free-ports — заодно освободить порты 80 и 443
   sudo tiktok-studio restart   перезапустить
   sudo tiktok-studio logs      журнал работы (logs 300 — последние 300 строк)
   sudo tiktok-studio status    состояние служб

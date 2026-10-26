@@ -88,13 +88,25 @@ function toast(msg, type = "info", ms = 5000) {
   setTimeout(() => el.remove(), ms);
 }
 
+// fetch падает с «Failed to fetch», когда сервер студии недоступен.
+function offlineMessage() {
+  return ["127.0.0.1", "localhost"].includes(location.hostname)
+    ? "Студия не отвечает — похоже, окно студии на компьютере закрыто. Запустите start.bat снова и обновите страницу."
+    : "Нет связи со студией. Проверьте интернет и обновите страницу.";
+}
+
 async function api(url, opts = {}) {
   const init = { ...opts };
   if (init.body && !(init.body instanceof FormData) && typeof init.body !== "string") {
     init.body = JSON.stringify(init.body);
     init.headers = { "Content-Type": "application/json", ...(init.headers || {}) };
   }
-  const res = await fetch(url, init);
+  let res;
+  try {
+    res = await fetch(url, init);
+  } catch (_) {
+    throw new Error(offlineMessage());
+  }
   if (!res.ok) {
     let msg = `${res.status} ${res.statusText}`;
     try {

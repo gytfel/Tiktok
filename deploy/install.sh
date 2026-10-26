@@ -6,12 +6,16 @@
 # Со своим доменом вместо IP-адреса (A-запись домена должна указывать на сервер):
 #   curl -fsSL https://raw.githubusercontent.com/gytfel/Tiktok/main/deploy/install.sh | sudo bash -s -- --domain studio.example.com
 #
+# Если порты 80/443 заняты другой программой (например, Jupyter или веб-панель из шаблона
+# сервера), установщик назовёт её и остановится; --free-ports остановит и отключит её.
+#
 # Повторный запуск (или «sudo tiktok-studio update») обновляет студию; видео, загрузки,
 # ключи нейросетей и код доступа сохраняются в /var/lib/tiktok-studio.
 #
 # Для проверки скрипта без настоящего сервера:
 #   TS_SOURCE_DIR=<папка с кодом>  взять код из папки, а не с GitHub
 #   TS_SKIP_APT=1 TS_SKIP_CADDY=1 TS_NO_SYSTEMD=1 TS_PUBLIC_IP=<адрес> TS_CADDYFILE=<файл>
+#   TS_CHECK_PORTS=1  проверять порты 80/443 даже с TS_SKIP_CADDY
 set -euo pipefail
 
 REPO="${TS_REPO:-gytfel/Tiktok}"
@@ -26,6 +30,7 @@ PORT=8765
 CADDYFILE="${TS_CADDYFILE:-/etc/caddy/Caddyfile}"
 MARKER="# TikTok Studio"
 DOMAIN=""
+FREE_PORTS=""
 
 say()  { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 warn() { printf '\033[1;33m[!] %s\033[0m\n' "$*"; }
@@ -35,6 +40,7 @@ usage() {
   cat <<'EOF'
 Установка TikTok Studio на сервер.
   --domain ИМЯ   использовать свой домен (по умолчанию — IP-адрес сервера)
+  --free-ports   остановить и отключить программы, которые заняли порты 80 и 443
   -h, --help     эта справка
 EOF
 }
@@ -43,6 +49,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --domain) DOMAIN="${2:-}"; shift 2 ;;
     --domain=*) DOMAIN="${1#--domain=}"; shift ;;
+    --free-ports) FREE_PORTS=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) die "неизвестный параметр: $1 (см. --help)" ;;
   esac
@@ -62,6 +69,77 @@ fi
 # Домен из прошлой установки, если сейчас не указан.
 if [ -z "$DOMAIN" ] && [ -r "$SERVER_ENV" ]; then
   DOMAIN="$(sed -n 's/^STUDIO_DOMAIN=//p' "$SERVER_ENV" | head -1)"
+fi
+
+if [ -z "${TS_NO_SYSTEMD:-}" ] && [ ! -d /run/systemd/system ]; then
+  die "на этой машине нет systemd — похоже, это контейнер или облачная среда (например, Jupyter), а не обычный VPS.
+Студии нужен обычный сервер: в панели хостинга создайте (или переустановите) VPS с чистой Ubuntu 24.04."
+fi
+
+# ------------------------------------------------------------------ порты 80 и 443
+
+# Кто слушает TCP-порт: строки «программа pid» (Caddy студии сюда тоже попадает).
+port_users() {
+  ss -Hltnp "sport = :$1" 2>/dev/null | grep -o '("[^"]*",pid=[0-9]*' | sed 's/("\([^"]*\)",pid=\([0-9]*\)/\1 \2/' | sort -u || true
+}
+
+service_of() {
+  grep -q 'user@' "/proc/$1/cgroup" 2>/dev/null && return 0
+  grep -o '[^/]*\.service$' "/proc/$1/cgroup" 2>/dev/null | head -1 || true
+}
+
+# Чужие программы на портах 80/443: «порт 443: jupyter-lab (служба jupyter.service)».
+port_conflicts() {
+  local port name pid unit
+  for port in 80 443; do
+    while read -r name pid; do
+      [ -n "$pid" ] && [ "$name" != caddy ] || continue
+      unit="$(service_of "$pid")"
+      printf '  порт %s: %s%s\n' "$port" "$name" "${unit:+ (служба $unit)}"
+    done < <(port_users "$port")
+  done
+}
+
+free_ports() {
+  local port name pid unit ids
+  for port in 80 443; do
+    while read -r name pid; do
+      [ -n "$pid" ] && [ "$name" != caddy ] || continue
+      if [ "$name" = docker-proxy ] && command -v docker >/dev/null 2>&1; then
+        ids="$(docker ps -q --filter "publish=$port")"
+        if [ -n "$ids" ]; then
+          # shellcheck disable=SC2086
+          docker update --restart=no $ids >/dev/null && docker stop $ids >/dev/null
+          say "Остановил Docker-контейнер(ы), занимавшие порт $port: ${ids//$'\n'/ }"
+        fi
+        continue
+      fi
+      unit="$(service_of "$pid")"
+      if [ -n "$unit" ] && [ -z "${TS_NO_SYSTEMD:-}" ] && systemctl disable --now "$unit" >/dev/null 2>&1; then
+        say "Остановил и отключил службу $unit ($name), занимавшую порт $port"
+      elif kill "$pid" 2>/dev/null; then
+        say "Остановил программу $name (pid $pid), занимавшую порт $port"
+      fi
+    done < <(port_users "$port")
+  done
+  sleep 2
+}
+
+if [ -z "${TS_SKIP_CADDY:-}" ] || [ -n "${TS_CHECK_PORTS:-}" ]; then
+  conflicts="$(port_conflicts)"
+  if [ -n "$conflicts" ] && [ -n "$FREE_PORTS" ]; then
+    free_ports
+    conflicts="$(port_conflicts)"
+  fi
+  if [ -n "$conflicts" ]; then
+    die "студии нужны порты 80 и 443 (через них работает HTTPS), но их занимает другая программа:
+$conflicts
+Поэтому по адресу сервера открывается она, а не студия.
+Если эта программа вам не нужна (например, Jupyter или веб-панель из шаблона сервера),
+запустите установку с параметром --free-ports — установщик остановит и отключит её:
+  curl -fsSL https://raw.githubusercontent.com/$REPO/$BRANCH/deploy/install.sh | sudo bash -s -- --free-ports
+Если нужна — поставьте студию на отдельный сервер с чистой Ubuntu 24.04."
+  fi
 fi
 
 free_mb=$(df -Pm / | awk 'NR==2 {print $4}')
@@ -280,7 +358,10 @@ if [ -z "${TS_SKIP_CADDY:-}" ]; then
   fi
   if [ -z "${TS_NO_SYSTEMD:-}" ]; then
     systemctl enable --quiet caddy
-    systemctl restart caddy
+    if ! systemctl restart caddy; then
+      journalctl -u caddy -n 15 --no-pager 2>/dev/null || true
+      die "веб-сервер Caddy не запустился (журнал выше). Подробная проверка: sudo tiktok-studio doctor"
+    fi
   fi
 else
   write_caddyfile
@@ -302,14 +383,23 @@ if [ -z "${TS_NO_SYSTEMD:-}" ]; then
     say "Получаю сертификат HTTPS (до 2 минут)…"
     https_ok=""
     for _ in $(seq 1 24); do
-      code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 "$URL/" || true)"
-      if [ "$code" = "401" ]; then https_ok=1; break; fi
+      # Ответ «Нужен код доступа» бывает только у студии — так видно, что по ссылке именно она.
+      if curl -s --max-time 8 "$URL/api/status" 2>/dev/null | grep -q "Нужен код доступа"; then https_ok=1; break; fi
       sleep 5
     done
     if [ -z "$https_ok" ]; then
-      warn "Сертификат пока не получен. Обычно причина — закрытые порты: в панели хостинга"
-      warn "в разделе «Firewall»/«Сетевые правила» разрешите входящие TCP 80 и 443."
-      warn "Затем выполните: sudo tiktok-studio restart. Журнал веб-сервера: journalctl -u caddy -n 50"
+      code="$(curl -sk -o /dev/null -w '%{http_code}' --max-time 8 "$URL/api/status" || true)"
+      if curl -sk --max-time 8 "$URL/api/status" 2>/dev/null | grep -q "Нужен код доступа"; then
+        warn "Студия отвечает, но сертификат HTTPS пока не получен. Обычно причина — закрытые порты:"
+        warn "в панели хостинга в разделе «Firewall»/«Сетевые правила» разрешите входящие TCP 80 и 443."
+      elif [ "$code" != "000" ]; then
+        warn "По адресу $URL отвечает другая программа, а не студия. Похоже, порты 80/443 этого адреса"
+        warn "заняты на стороне хостинга (например, шаблоном с Jupyter). Переустановите сервер на чистую Ubuntu 24.04."
+      else
+        warn "Адрес $URL не отвечает. В панели хостинга в разделе «Firewall»/«Сетевые правила»"
+        warn "разрешите входящие TCP 80 и 443."
+      fi
+      warn "Затем: sudo tiktok-studio restart. Проверка всего сразу: sudo tiktok-studio doctor"
     fi
   fi
 fi
