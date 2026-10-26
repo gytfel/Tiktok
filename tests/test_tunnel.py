@@ -75,7 +75,8 @@ def test_tunnel_failure_shows_cloudflared_log(workspace):
     t = tunnel_mod.Tunnel()
     t.start(8765)
     wait_for(t, {"error"})
-    assert "i/o timeout" in t.error and t.url == ""
+    assert "i/o timeout" in t.detail and t.url == ""
+    assert "trycloudflare.com не ответил" in t.error  # ссылку так и не выдали
 
 
 FAKE_ONLY_QUIC = """#!{python}
@@ -127,8 +128,32 @@ def test_tunnel_all_attempts_fail(workspace):
     t = tunnel_mod.Tunnel()
     t.start(8765)
     wait_for(t, {"error"})
-    assert "ни одним из способов" in t.error and "VPN" in t.error
+    assert "провайдер ограничивает Cloudflare" in t.error
     assert sum(1 for line in t.log if line.startswith("--- способ")) == len(tunnel_mod.ATTEMPTS)
+    assert t.status()["detail"] == t.detail != ""
+
+
+FAKE_URL_THEN_SILENCE = """#!{python}
+import time
+print("INF Requesting new quick Tunnel on trycloudflare.com...", flush=True)
+print("INF |  https://got-url-but-stuck.trycloudflare.com  |", flush=True)
+print('INF precheck component="TCP Connectivity" details="HTTP/2 connection successful" status=pass', flush=True)
+print("INF precheck complete hard_fail=false suggested_protocol=http2", flush=True)
+time.sleep(60)  # соединение есть, но Cloudflare так и не ответил
+"""
+
+
+@pytest.mark.skipif(os.name == "nt", reason="имитация cloudflared — shell-скрипт")
+def test_tunnel_explains_throttled_cloudflare(workspace, monkeypatch):
+    # Так выглядит ограничение Cloudflare провайдером: ссылка выдана, проверки прошли, подключения нет.
+    monkeypatch.setattr(tunnel_mod, "START_TIMEOUT", 0.3)
+    install_fake(FAKE_URL_THEN_SILENCE)
+    t = tunnel_mod.Tunnel()
+    t.start(8765)
+    wait_for(t, {"error"})
+    assert "выдал ссылку" in t.error and "провайдер" in t.error
+    assert "precheck component" not in t.detail  # шум проверок убран
+    assert "precheck complete" in t.detail and "не подключился" in t.detail
 
 
 def test_download_extracts_macos_archive(workspace, monkeypatch):
@@ -197,6 +222,9 @@ def test_tunnel_requests_are_not_treated_as_local(app, monkeypatch):
     # С телефона через туннель нельзя управлять туннелем и не видно кода.
     assert c.post("/api/tunnel/stop", headers=CF).status_code == 403
     assert c.get("/api/phone", headers=CF).json()["remote"] is True
+    monkeypatch.setattr(tunnel_mod.tunnel, "detail", "журнал cloudflared")
+    assert c.get("/api/tunnel", headers=CF).json()["detail"] == ""  # журнал — только на компьютере
+    assert c.get("/api/tunnel").json()["detail"] == "журнал cloudflared"
 
 
 def test_too_many_wrong_codes_locks_login(app, monkeypatch):

@@ -149,6 +149,8 @@ def phone_access(request: Request) -> dict:
 def tunnel_status(request: Request) -> dict:
     data = tunnel.status()
     data["url"] = data["url"] if tunnel.state == "running" or _is_local_request(request) else ""
+    if not _is_local_request(request):
+        data["detail"] = ""
     if _is_local_request(request) and data["url"]:
         data["phone_url"] = f"{data['url']}/?key={phone.access_key()}"
         data["key"] = phone.access_key()

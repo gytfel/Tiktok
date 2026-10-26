@@ -1055,6 +1055,8 @@ function setupSettings() {
 
 // ------------------------------------------------------------------ телефон
 
+const SERVER_GUIDE = "https://github.com/gytfel/Tiktok/blob/main/deploy/README.md";
+
 async function openPhone() {
   $("#phoneDialog").showModal();
   $("#phoneBody").innerHTML = `
@@ -1090,6 +1092,7 @@ async function refreshTunnel() {
   try { t = await api("/api/tunnel"); } catch (e) { box.textContent = e.message; return; }
   if (t.state === "off") {
     box.innerHTML = `<p class="hint">Студия получит временную защищённую ссылку через бесплатный сервис Cloudflare — её можно открыть с телефона где угодно. Компьютер со студией при этом должен быть включён. В первый раз скачается программа cloudflared (~40 МБ).</p>
+      <p class="hint">В России многие провайдеры ограничивают Cloudflare, и этот способ может не сработать. Надёжнее — <a href="${SERVER_GUIDE}" target="_blank" rel="noopener">студия на сервере</a>.</p>
       <button class="btn primary" data-tunnel="start">Включить доступ из интернета</button>`;
   } else if (t.state === "downloading") {
     box.innerHTML = `<p>Скачиваю cloudflared… ${t.progress}%</p><div class="progress"><div style="width:${t.progress}%"></div></div>
@@ -1110,7 +1113,13 @@ async function refreshTunnel() {
       <button class="btn secondary" data-tunnel="stop">Выключить доступ из интернета</button>`;
   } else {
     box.innerHTML = `<p class="job-error">${esc(t.error || "Не удалось включить доступ")}</p>
-      <p class="hint">Если мобильный интернет или провайдер блокирует Cloudflare, попробуйте позже, через VPN или с помощью Tailscale (см. README).</p>
+      <p class="hint"><b>Что можно сделать:</b></p>
+      <ol class="phone-steps">
+        <li>Поставить студию на сервер (VPS) — тогда она открывается с телефона через любой интернет без Cloudflare и работает, даже когда компьютер выключен. <a href="${SERVER_GUIDE}" target="_blank" rel="noopener">Инструкция</a></li>
+        <li>Включить VPN на компьютере <b>и</b> на телефоне, затем нажать «Попробовать снова».</li>
+        <li>Дома — открыть студию по Wi-Fi (раздел ниже): интернет для этого не нужен.</li>
+      </ol>
+      ${t.detail ? `<details class="tech"><summary>Технические подробности</summary><pre class="log">${esc(t.detail)}</pre></details>` : ""}
       <button class="btn primary" data-tunnel="start">Попробовать снова</button>`;
   }
   if (["downloading", "starting"].includes(t.state) || (t.state === "running" && !t.url)) {

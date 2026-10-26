@@ -24,7 +24,7 @@ from . import config
 from .net import USER_AGENT, opener
 
 DOWNLOAD_BASE = "https://github.com/cloudflare/cloudflared/releases/latest/download/"
-URL_RE = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com")
+URL_RE = re.compile(r"https://(?!api\.)[a-z0-9-]+\.trycloudflare\.com")  # api.… — адрес сервиса, а не ссылка
 READY_MARK = "Registered tunnel connection"
 # Способы подключения к Cloudflare по очереди. По умолчанию cloudflared начинает
 # с QUIC (UDP), который многие провайдеры режут, и после неудачи просто
@@ -36,6 +36,14 @@ ATTEMPTS: list[tuple[str, list[str]]] = [
     ("TCP, серверы региона US", ["--protocol", "http2", "--region", "us"]),
 ]
 START_TIMEOUT = 45.0  # столько ждём подключения, прежде чем пробовать следующий способ
+# Строки журнала cloudflared, которые только мешают найти причину ошибки.
+LOG_NOISE = ("precheck component=", "Thank you for trying Cloudflare Tunnel", "+----")
+# С лета 2025 года многие провайдеры в России ограничивают Cloudflare: соединение
+# устанавливается (проверки cloudflared проходят), но обмен данными обрывается.
+BLOCKED_HINT = (
+    "Обычно так бывает, когда интернет-провайдер ограничивает Cloudflare — в России это происходит "
+    "у многих операторов с лета 2025 года."
+)
 
 
 def _asset_name() -> str:
@@ -63,10 +71,12 @@ class Tunnel:
         self.state = "off"  # off | downloading | starting | running | error
         self.url = ""
         self.error = ""
+        self.detail = ""  # хвост журнала cloudflared для «Технических подробностей»
         self.progress = 0.0
         self.attempt = 0
         self.method = ""
-        self.log: deque[str] = deque(maxlen=40)
+        self.got_url = False  # Cloudflare выдал ссылку хотя бы в одной попытке
+        self.log: deque[str] = deque(maxlen=200)
 
     # ------------------------------------------------------------ состояние
 
@@ -82,7 +92,12 @@ class Tunnel:
             "attempt": self.attempt,
             "attempts": len(ATTEMPTS),
             "method": self.method,
+            "detail": self.detail,
         }
+
+    def log_tail(self, lines: int = 25) -> str:
+        useful = [line for line in self.log if line.strip() and not any(n in line for n in LOG_NOISE)]
+        return "\n".join(useful[-lines:])
 
     # ------------------------------------------------------------ запуск
 
@@ -90,14 +105,15 @@ class Tunnel:
         with self._lock:
             if self.state in ("downloading", "starting", "running") and (self._proc is None or self._proc.poll() is None):
                 return
-            self.state, self.url, self.error, self.progress = "starting", "", "", 0.0
+            self.state, self.url, self.error, self.detail, self.progress = "starting", "", "", "", 0.0
+            self.got_url = False
             self.log.clear()
         threading.Thread(target=self._run, args=(port,), daemon=True, name="tunnel").start()
 
     def stop(self) -> None:
         with self._lock:
             proc, self._proc = self._proc, None
-            self.state, self.url, self.error = "off", "", ""
+            self.state, self.url, self.error, self.detail = "off", "", "", ""
         if proc and proc.poll() is None:
             proc.terminate()
             try:
@@ -121,15 +137,16 @@ class Tunnel:
             if outcome in ("stopped", "error"):
                 return
             if outcome == "died":
-                tail = "\n".join(list(self.log)[-6:])
-                self._fail("Туннель оборвался. Проверьте интернет и включите доступ ещё раз.\n" + tail)
+                self._fail("Туннель оборвался. Проверьте интернет и включите доступ ещё раз.", self.log_tail())
                 return
-        tail = "\n".join(line for line in list(self.log)[-8:] if not line.startswith("---"))
-        self._fail(
-            "Не удалось подключиться к Cloudflare ни одним из способов — похоже, провайдер блокирует "
-            "туннели Cloudflare. Включите VPN на компьютере и нажмите «Попробовать снова», "
-            "или подключите телефон через Tailscale (см. README).\n" + tail
-        )
+        if self.got_url:
+            reason = (
+                f"Cloudflare выдал ссылку, но подключиться к его серверам не удалось ни одним из способов "
+                f"({len(ATTEMPTS)} попытки): соединение устанавливается, но передача данных обрывается. "
+            )
+        else:
+            reason = "Не удалось получить ссылку от Cloudflare: сервис trycloudflare.com не ответил. "
+        self._fail(reason + BLOCKED_HINT, self.log_tail())
 
     def _launch(self, exe: Path, port: int, extra: list[str]) -> str:
         """Запускает cloudflared. Возвращает stopped (выключили кнопкой), failed (не подключился —
@@ -170,6 +187,7 @@ class Tunnel:
                 m = URL_RE.search(line)
                 if m:
                     self.url = m.group(0)
+                    self.got_url = True
             if self.url and READY_MARK in line and self._proc is proc:
                 connected = True
                 self.state = "running"
@@ -181,10 +199,10 @@ class Tunnel:
             self._proc = None
         return "died" if connected else "failed"
 
-    def _fail(self, message: str) -> None:
+    def _fail(self, message: str, detail: str = "") -> None:
         with self._lock:
             self._proc = None
-            self.state, self.error, self.url = "error", message, ""
+            self.state, self.error, self.detail, self.url = "error", message, detail, ""
 
     def _ensure_binary(self) -> Path:
         found = shutil.which("cloudflared")
