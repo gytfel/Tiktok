@@ -340,3 +340,147 @@ def test_reference_api_runs_in_background(client, monkeypatch, sample_video):
         time.sleep(0.1)
     assert task["status"] == "done", task.get("error")
     assert task["progress"] == 100 and task["result"]["project"]["background"]["type"] == "ai"
+
+
+# ---------------------------------------------------------------- слайд-шоу
+
+
+def make_png(tmp_path, name, color, size):
+    path = tmp_path / name
+    subprocess.run([ffmpeg_exe(), "-v", "error", "-y", "-f", "lavfi", "-i", f"color=c={color}:s={size}", "-frames:v", "1", str(path)], check=True)
+    return path
+
+
+def make_mp3(tmp_path):
+    path = tmp_path / "music.mp3"
+    subprocess.run([ffmpeg_exe(), "-v", "error", "-y", "-f", "lavfi", "-i", "sine=f=440:d=4", "-c:a", "libmp3lame", str(path)], check=True)
+    return path
+
+
+def fake_tiktok(monkeypatch, files: dict, post: dict):
+    """yt_dlp, который раскрывает короткую ссылку в фото-пост и отдаёт его данные и файлы."""
+    calls = {"pages": [], "fetched": []}
+
+    class Req:
+        def __init__(self, url, headers=None):
+            self.url, self.headers = url, headers or {}
+
+    class HEADRequest(Req):
+        pass
+
+    class Resp:
+        def __init__(self, url, body=b""):
+            self.url, self.body = url, body
+
+        def read(self):
+            return self.body
+
+        def close(self):
+            pass
+
+    class IE:
+        def _extract_web_data_and_status(self, url, video_id, fatal=True):
+            calls["pages"].append(url)
+            return (post, 0) if "/photo/" in url else ({}, 0)
+
+    class YoutubeDL:
+        def __init__(self, opts):
+            calls["opts"] = opts
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def urlopen(self, req):
+            if isinstance(req, HEADRequest):
+                return Resp("https://www.tiktok.com/@author/photo/7512345678901234567?_r=1")
+            calls["fetched"].append(req.url)
+            if req.url not in files:
+                raise OSError("404")
+            return Resp(req.url, files[req.url])
+
+        def get_info_extractor(self, key):
+            assert key == "TikTok"
+            return IE()
+
+        def extract_info(self, url, download=True):
+            raise AssertionError("фото-пост не должен идти через extract_info")
+
+    networking = types.SimpleNamespace(Request=Req, HEADRequest=HEADRequest)
+    monkeypatch.setitem(sys.modules, "yt_dlp", types.SimpleNamespace(YoutubeDL=YoutubeDL, networking=networking))
+    monkeypatch.setitem(sys.modules, "yt_dlp.networking", networking)
+    return calls
+
+
+@needs_ffmpeg
+def test_download_tiktok_photo_post_builds_slideshow(monkeypatch, tmp_path):
+    imgs = [make_png(tmp_path, f"s{i}.png", c, size) for i, (c, size) in enumerate([("red", "720x1560"), ("blue", "1080x1080"), ("white", "640x480")])]
+    files = {f"https://cdn/{i}.jpeg": p.read_bytes() for i, p in enumerate(imgs)}
+    files["https://cdn/music.mp3"] = make_mp3(tmp_path).read_bytes()
+    post = {
+        "desc": "Сохранённые сообщения #бот",
+        "music": {"playUrl": "https://cdn/music.mp3", "duration": 9},
+        "imagePost": {"images": [{"imageURL": {"urlList": ["https://cdn/broken.webp", f"https://cdn/{i}.jpeg"]}} for i in range(3)]},
+    }
+    calls = fake_tiktok(monkeypatch, files, post)
+    meta = reference.download("https://vt.tiktok.com/ZSg4A93Qu/")
+    assert calls["pages"][0].startswith("https://www.tiktok.com/@author/photo/7512345678901234567")
+    assert "https://cdn/broken.webp" in calls["fetched"]  # битая ссылка пропущена, взята следующая
+    stored, path = library.get_upload(meta["id"])
+    assert stored["slideshow"] and stored["slides"] == 3 and stored["slide_seconds"] == 3.0
+    assert stored["caption"] == "Сохранённые сообщения #бот" and meta["name"].startswith("Образец (слайды)")
+    info = reference.probe(path)
+    assert info["has_audio"] and abs(info["duration"] - 9.0) < 0.3 and (info["width"], info["height"]) == (720, 1280)
+
+
+def test_download_photo_post_without_images_is_explained(monkeypatch):
+    fake_tiktok(monkeypatch, {}, {"desc": "пусто"})
+    with pytest.raises(reference.ReferenceError, match="скриншоты"):
+        reference.download("https://vt.tiktok.com/ZSg4A93Qu/")
+
+
+@needs_ffmpeg
+def test_slideshow_from_uploaded_screenshots(tmp_path):
+    ids = []
+    for i, color in enumerate(("red", "green")):
+        with open(make_png(tmp_path, f"shot{i}.png", color, "540x1170"), "rb") as f:
+            ids.append(library.save_upload(f"shot{i}.png", f)["id"])
+    meta = reference.slideshow_from_uploads(ids)
+    stored, path = library.get_upload(meta["id"])
+    assert stored["slides"] == 2 and not reference.probe(path)["has_audio"]
+    with pytest.raises(reference.ReferenceError):
+        reference.slideshow_from_uploads([meta["id"]])  # видео вместо картинки
+
+
+class SlidesProvider(FakeProvider):
+    def __init__(self):
+        super().__init__()
+        self.sheets = []
+
+    def transcribe(self, audio, duration=0.0):
+        raise AssertionError("музыку слайд-шоу не нужно распознавать")
+
+    def look(self, image, prompt):
+        n = int(re.search(r"contact sheet of (\d+) keyframes", prompt).group(1))
+        start = sum(self.sheets) + 1
+        self.sheets.append(n)
+        return json.dumps({"frames": [{"n": i, "shot": "chat screenshot", "text": f"текст слайда {start + i - 1}"} for i in range(1, n + 1)]})
+
+
+@needs_ffmpeg
+def test_analyze_slideshow_reads_slides_in_big_sheets(tmp_path):
+    ids = []
+    for i, color in enumerate(("red", "green", "blue", "white", "yellow")):
+        with open(make_png(tmp_path, f"shot{i}.png", color, "540x1170"), "rb") as f:
+            ids.append(library.save_upload(f"shot{i}.png", f)["id"])
+    item = reference.slideshow_from_uploads(ids)["id"]
+    provider = SlidesProvider()
+    res = reference.analyze(item, provider, mode="exact")
+    assert provider.sheets == [4, 1]  # по 4 слайда на снимок
+    shots = res["reference"]["shots"]
+    assert [s["text"] for s in shots] == [f"текст слайда {i}" for i in range(1, 6)]
+    assert [(s["start"], s["end"]) for s in shots][:2] == [(0.0, 3.0), (3.0, 6.0)]
+    assert res["reference"]["slideshow"] and not res["warnings"]
+    assert "on-screen text of each slide" in provider.system and "photo slideshow" in provider.brief

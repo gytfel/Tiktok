@@ -1162,7 +1162,7 @@ async function setupPhone() {
 // ------------------------------------------------------------------ по образцу
 
 // phase: form → busy → result. Разбор идёт на сервере, окно можно закрыть и открыть снова.
-const ref = { phase: "form", file: null, result: null, stage: "", progress: 0 };
+const ref = { phase: "form", files: [], result: null, stage: "", progress: 0 };
 
 function showRef() {
   $("#refForm").hidden = ref.phase !== "form";
@@ -1173,7 +1173,8 @@ function showRef() {
   $("#refAgain").hidden = ref.phase !== "result";
   $("#refStage").textContent = ref.stage || "Подготовка…";
   $("#refBar").style.width = `${ref.progress}%`;
-  $("#refFileName").textContent = ref.file ? ref.file.name : "";
+  $("#refFileName").textContent = ref.files.length === 1 ? ref.files[0].name
+    : ref.files.length ? `${ref.files.length} ${plural(ref.files.length, "картинка", "картинки", "картинок")} — слайды по порядку` : "";
 }
 function openRef() {
   if (ref.phase === "form") {
@@ -1191,9 +1192,13 @@ function refProgress(stage, progress) {
 }
 async function startRef() {
   const url = $("#refUrl").value.trim();
-  if (!url && !ref.file) {
+  const files = ref.files;
+  const images = files.filter((f) => f.type.startsWith("image/"));
+  let problem = !url && !files.length ? "Вставьте ссылку на ролик или загрузите видео либо скриншоты." : "";
+  if (!url && files.length && images.length !== files.length && files.length > 1) problem = "Выберите одно видео или несколько картинок (скриншотов).";
+  if (problem) {
     $("#refError").hidden = false;
-    $("#refError").textContent = "Вставьте ссылку на ролик или загрузите видео.";
+    $("#refError").textContent = problem;
     return;
   }
   $("#refError").hidden = true;
@@ -1201,16 +1206,24 @@ async function startRef() {
   refProgress(url ? "Скачиваю видео…" : "Загружаю видео…", 0);
   try {
     let uploadId = null;
+    const imageIds = [];
     if (!url) {
-      const file = ref.file;
-      const meta = await uploadOne(file, (loaded) => refProgress(`Загружаю видео… ${Math.round((loaded / file.size) * 100)}%`, (loaded / file.size) * 15));
-      uploadId = meta.id;
+      const total = files.reduce((n, f) => n + f.size, 0) || 1;
+      let done = 0;
+      for (const file of files) {
+        const what = images.length ? "скриншоты" : "видео";
+        const meta = await uploadOne(file, (loaded) => refProgress(`Загружаю ${what}… ${Math.round(((done + loaded) / total) * 100)}%`, ((done + loaded) / total) * 15));
+        done += file.size;
+        if (images.length) imageIds.push(meta.id);
+        else uploadId = meta.id;
+      }
     }
     let task = await api("/api/reference", {
       method: "POST",
       body: {
         url,
         upload_id: uploadId,
+        upload_ids: imageIds,
         topic: $("#refTopic").value.trim(),
         mode: $("#refMode").value,
         language: $("#refLang").value,
@@ -1241,8 +1254,8 @@ function renderRefResult() {
   const info = r.reference;
   const facts = [
     `${Math.round(info.duration)} сек`,
-    `${info.shots.length} ${plural(info.shots.length, "кадр", "кадра", "кадров")}`,
-    info.transcript ? `речь: ${info.language || "?"}${info.pace ? `, ~${info.pace} символов в секунду` : ""}` : "без речи",
+    info.slideshow ? `${info.shots.length} ${plural(info.shots.length, "слайд", "слайда", "слайдов")}` : `${info.shots.length} ${plural(info.shots.length, "кадр", "кадра", "кадров")}`,
+    info.transcript ? `речь: ${info.language || "?"}${info.pace ? `, ~${info.pace} символов в секунду` : ""}` : info.slideshow ? "текст со слайдов" : "без речи",
   ].join(" · ");
   const paragraphs = r.project.text.split(/\n\n+/);
   const scenes = r.project.background.ai_scenes;
@@ -1279,13 +1292,14 @@ function setupReference() {
   $("#refAgain").addEventListener("click", () => { ref.phase = "form"; ref.result = null; showRef(); });
   $("#refPick").addEventListener("click", () => $("#refFile").click());
   $("#refFile").addEventListener("change", (e) => {
-    ref.file = e.target.files[0] || null;
-    if (ref.file) $("#refUrl").value = "";
+    // Скриншоты идут слайдами в порядке имён файлов (как их обычно сохраняет телефон).
+    ref.files = [...e.target.files].sort((x, y) => x.name.localeCompare(y.name, undefined, { numeric: true }));
+    if (ref.files.length) $("#refUrl").value = "";
     e.target.value = "";
     showRef();
   });
   $("#refUrl").addEventListener("input", () => {
-    if ($("#refUrl").value.trim() && ref.file) { ref.file = null; showRef(); }
+    if ($("#refUrl").value.trim() && ref.files.length) { ref.files = []; showRef(); }
   });
 }
 

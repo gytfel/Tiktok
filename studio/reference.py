@@ -30,6 +30,13 @@ LONG_SHOT = 7.0  # длинный план делим на части, чтоб�
 CUT_SCORE = 0.3  # порог смены кадра для фильтра select='gt(scene,…)'
 BASE_CPS = 14.0  # символов в секунду у голоса студии при скорости 0
 TILE_W, TILE_H = 270, 480
+# Слайд-шоу (фото-пост TikTok или свои скриншоты): слайды крупнее, чтобы модель прочитала текст.
+MAX_SLIDES = 20
+SLIDE_W, SLIDE_H = 720, 1280
+SLIDE_SECONDS = 3.0
+BIG_TILE = (540, 960)
+TIKTOK_SHORT_RE = re.compile(r"^https?://(?:(?:vm|vt)\.tiktok\.com|(?:www\.)?tiktok\.com/t)/\w+", re.I)
+TIKTOK_POST_RE = re.compile(r"^https?://(?:www\.|m\.)?tiktok\.com/@([\w.-]*)/(photo|video)/(\d+)", re.I)
 
 LANGUAGES = {
     "ru": "Russian", "en": "English", "uk": "Ukrainian", "kk": "Kazakh", "de": "German", "fr": "French",
@@ -100,8 +107,14 @@ def download(url: str, on_progress: Callable[[float], None] | None = None) -> di
         opts["proxy"] = config.get_proxy()
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(url.strip(), download=True) or {}
-        files = sorted((p for p in tmp.iterdir() if p.suffix.lower() in config.VIDEO_EXTENSIONS), key=lambda p: p.stat().st_size)
+            target = resolve_short_link(ydl, url.strip())
+            post = TIKTOK_POST_RE.match(target)
+            if post and post.group(2).lower() == "photo":  # фото-пост: слайды с музыкой, yt-dlp их не берёт
+                return save_tiktok_slides(ydl, target, url.strip(), tmp, on_progress)
+            info = ydl.extract_info(target, download=True) or {}
+            files = sorted((p for p in tmp.iterdir() if p.suffix.lower() in config.VIDEO_EXTENSIONS), key=lambda p: p.stat().st_size)
+            if not files and post:  # слайд-шоу по ссылке /video/: yt-dlp скачал только музыку
+                return save_tiktok_slides(ydl, target, url.strip(), tmp, on_progress)
         if not files:
             raise ReferenceError("По ссылке не нашлось видео — проверьте, что ссылка ведёт на ролик, а не на профиль.")
         title = " ".join(str(info.get("title") or info.get("description") or "видео").split())
@@ -118,6 +131,159 @@ def download(url: str, on_progress: Callable[[float], None] | None = None) -> di
         raise ReferenceError(explain_download_error(str(exc))) from exc
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+def resolve_short_link(ydl, url: str) -> str:
+    """vt.tiktok.com/… → полный адрес поста: по нему видно, видео это или слайды."""
+    if not TIKTOK_SHORT_RE.match(url):
+        return url
+    from yt_dlp.networking import HEADRequest
+
+    try:
+        resp = ydl.urlopen(HEADRequest(url, headers={"User-Agent": "facebookexternalhit/1.1"}))
+        final = resp.url
+        resp.close()
+    except Exception:
+        return url  # пусть yt-dlp попробует сам
+    return final or url
+
+
+def _fetch(ydl, url: str) -> bytes:
+    from yt_dlp.networking import Request
+
+    resp = ydl.urlopen(Request(url, headers={"Referer": "https://www.tiktok.com/"}))
+    try:
+        return resp.read()
+    finally:
+        resp.close()
+
+
+def tiktok_post_data(ydl, page_url: str) -> dict:
+    """Данные поста со страницы TikTok — тем же способом, что и у yt-dlp (с обходом проверок)."""
+    user, _, post_id = TIKTOK_POST_RE.match(page_url).groups()
+    ie = ydl.get_info_extractor("TikTok")
+    for page in (page_url, f"https://www.tiktok.com/@{user or '_'}/video/{post_id}"):
+        try:
+            data, _status = ie._extract_web_data_and_status(page, post_id, fatal=False)
+        except Exception:
+            data = {}
+        if isinstance(data, dict) and (data.get("imagePost") or {}).get("images"):
+            return data
+    return {}
+
+
+def save_tiktok_slides(ydl, page_url: str, source_url: str, workdir: Path,
+                       on_progress: Callable[[float], None] | None = None) -> dict:
+    """Фото-пост TikTok: скачивает слайды и музыку и собирает из них видео-образец."""
+    data = tiktok_post_data(ydl, page_url)
+    images = (data.get("imagePost") or {}).get("images") or []
+    if not images:
+        raise ReferenceError(
+            "Не удалось получить слайды из этого поста TikTok. Сохраните скриншоты слайдов "
+            "и загрузите их картинками кнопкой «Загрузить видео или скриншоты»."
+        )
+    pictures: list[bytes] = []
+    for i, img in enumerate(images[:MAX_SLIDES]):
+        for src in ((img.get("imageURL") or {}).get("urlList") or []) if isinstance(img, dict) else []:
+            try:
+                pictures.append(_fetch(ydl, src))
+                break
+            except Exception:
+                continue
+        if on_progress:
+            on_progress((i + 1) / min(len(images), MAX_SLIDES))
+    music_info = data.get("music") or {}
+    music = None
+    if music_info.get("playUrl"):
+        try:
+            music = _fetch(ydl, music_info["playUrl"])
+        except Exception:
+            music = None  # без музыки разбор тоже работает
+    count = len(pictures)
+    seconds = SLIDE_SECONDS
+    if count and music_info.get("duration"):
+        seconds = max(2.0, min(4.0, float(music_info["duration"]) / count))
+    video, slides = build_slideshow(pictures, music, seconds, workdir)
+    desc = " ".join(str(data.get("desc") or "").split())
+    with open(video, "rb") as src:
+        return library.save_upload(
+            f"Образец (слайды) — {(desc or 'TikTok')[:50]}.mp4",
+            src,
+            extra={"reference_url": source_url, "caption": desc[:2000], **slideshow_meta(seconds, slides, len(images))},
+        )
+
+
+def slideshow_meta(seconds: float, slides: int, total: int) -> dict:
+    return {"slideshow": True, "slide_seconds": seconds, "slides": slides, "slides_total": total}
+
+
+def _fit_slide(data: bytes):
+    """Слайд 720x1280: картинка целиком на размытой подложке из неё же."""
+    from PIL import Image, ImageFilter, ImageOps
+
+    with Image.open(io.BytesIO(data)) as im:
+        im = ImageOps.exif_transpose(im).convert("RGB")
+        bg = ImageOps.fit(im, (SLIDE_W, SLIDE_H)).filter(ImageFilter.GaussianBlur(40)).point(lambda v: int(v * 0.45))
+        fg = ImageOps.contain(im, (SLIDE_W, SLIDE_H))
+        bg.paste(fg, ((SLIDE_W - fg.width) // 2, (SLIDE_H - fg.height) // 2))
+        return bg
+
+
+def build_slideshow(pictures: list[bytes], music: bytes | None, seconds: float, workdir: Path) -> tuple[Path, int]:
+    """Видео из картинок (по seconds секунд на слайд) с музыкой, если она есть.
+    Возвращает путь и число слайдов, которые удалось открыть."""
+    names = []
+    for data in pictures[:MAX_SLIDES]:
+        try:
+            slide = _fit_slide(data)
+        except Exception:  # не картинка или неизвестный формат — пропускаем
+            continue
+        name = f"slide{len(names):02d}.jpg"
+        slide.save(workdir / name, "JPEG", quality=90)
+        names.append(name)
+    if not names:
+        raise ReferenceError("Не получилось открыть ни одной картинки — нужны JPG, PNG или WEBP.")
+    lines = []
+    for name in names:
+        lines += [f"file '{name}'", f"duration {seconds:.3f}"]
+    lines.append(f"file '{names[-1]}'")  # concat требует повторить последний кадр
+    (workdir / "slides.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    args = ["-f", "concat", "-safe", "0", "-i", "slides.txt"]
+    if music:
+        (workdir / "music.mp3").write_bytes(music)
+        args += ["-stream_loop", "-1", "-i", "music.mp3", "-map", "0:v", "-map", "1:a", "-c:a", "aac", "-b:a", "128k"]
+    args += ["-vf", "fps=25,format=yuv420p", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+             "-t", f"{seconds * len(names):.2f}", "slideshow.mp4"]
+    try:
+        run_ffmpeg(args, cwd=workdir)
+    except FFmpegError:
+        if not music:
+            raise
+        return build_slideshow(pictures, None, seconds, workdir)  # музыка битая — собираем без неё
+    return workdir / "slideshow.mp4", len(names)
+
+
+def slideshow_from_uploads(item_ids: list[str]) -> dict:
+    """Свои скриншоты или картинки (по порядку) → видео-образец из слайдов."""
+    pictures = []
+    for item_id in item_ids[:MAX_SLIDES]:
+        try:
+            meta, path = library.get_upload(item_id)
+        except library.LibraryError as exc:
+            raise ReferenceError("Картинка не найдена — загрузите скриншоты ещё раз") from exc
+        if meta.get("kind") != "image":
+            raise ReferenceError("Выберите одно видео или несколько картинок (скриншотов)")
+        pictures.append(path.read_bytes())
+    config.ensure_dirs()
+    workdir = Path(tempfile.mkdtemp(prefix="slides-", dir=config.CACHE_DIR))
+    try:
+        video, slides = build_slideshow(pictures, None, SLIDE_SECONDS, workdir)
+        with open(video, "rb") as src:
+            return library.save_upload(
+                f"Образец (слайды) — {slides} картинок.mp4", src, extra=slideshow_meta(SLIDE_SECONDS, slides, len(pictures))
+            )
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
 
 
 def explain_download_error(message: str) -> str:
@@ -172,35 +338,37 @@ def plan_shots(duration: float, cuts: list[float]) -> list[Shot]:
     return shots
 
 
-def grab_frames(path: Path, shots: list[Shot], workdir: Path) -> list[Path]:
+def grab_frames(path: Path, shots: list[Shot], workdir: Path, size: tuple[int, int] = (TILE_W, TILE_H)) -> list[Path]:
+    w, h = size
     frames = []
     for i, sh in enumerate(shots, 1):
         out = workdir / f"frame{i:02d}.jpg"
         t = sh.start + sh.seconds / 2
-        vf = f"scale={TILE_W}:{TILE_H}:force_original_aspect_ratio=decrease,pad={TILE_W}:{TILE_H}:(ow-iw)/2:(oh-ih)/2"
+        vf = f"scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2"
         run_ffmpeg(["-ss", f"{t:.2f}", "-i", str(path), "-frames:v", "1", "-vf", vf, "-q:v", "3", str(out)])
         frames.append(out)
     return frames
 
 
-def contact_sheet(frames: list[Path]) -> bytes:
-    """Все кадры на одной картинке с номерами — модели достаточно одного снимка."""
+def contact_sheet(frames: list[Path], tile: tuple[int, int] = (TILE_W, TILE_H), cols: int = 4) -> bytes:
+    """Кадры на одной картинке с номерами — модели достаточно одного снимка."""
     from PIL import Image, ImageDraw, ImageFont
 
-    cols = min(4, len(frames))
+    tw, th = tile
+    cols = min(cols, len(frames))
     rows = math.ceil(len(frames) / cols)
     gap = 6
-    sheet = Image.new("RGB", (cols * (TILE_W + gap) + gap, rows * (TILE_H + gap) + gap), "#111111")
+    sheet = Image.new("RGB", (cols * (tw + gap) + gap, rows * (th + gap) + gap), "#111111")
     try:
         font = ImageFont.truetype(str(config.FONTS_DIR / config.FONTS[config.DEFAULT_FONT]["file"]), 44)
     except OSError:
         font = ImageFont.load_default()
     draw = ImageDraw.Draw(sheet)
     for i, frame in enumerate(frames):
-        x = gap + (i % cols) * (TILE_W + gap)
-        y = gap + (i // cols) * (TILE_H + gap)
+        x = gap + (i % cols) * (tw + gap)
+        y = gap + (i // cols) * (th + gap)
         with Image.open(frame) as im:
-            sheet.paste(im.convert("RGB").resize((TILE_W, TILE_H)), (x, y))
+            sheet.paste(im.convert("RGB").resize((tw, th)), (x, y))
         draw.rectangle((x, y, x + 64, y + 58), fill="#FFE600")
         draw.text((x + 32, y + 29), str(i + 1), fill="#000000", font=font, anchor="mm")
     buf = io.BytesIO()
@@ -212,26 +380,34 @@ _LOOK_PROMPT = (
     "This is a contact sheet of {n} keyframes from a vertical short video (TikTok/Reels), numbered 1-{n} "
     "in yellow squares, left to right, top to bottom. For EVERY frame write in English, 15-35 words, what "
     "the shot shows: subject, action, setting, camera angle and distance, lighting and colors, and the kind "
-    "of footage (real video, screen recording, animation, text slide). Also copy any big on-screen text "
-    "exactly, in its original language (empty string if none). Reply with JSON only: "
+    "of footage (real video, screen recording, screenshot, animation, text slide). Also copy the on-screen "
+    "text exactly, in its original language: for screenshots and text slides all readable text, up to about "
+    "300 characters (empty string if none). Reply with JSON only: "
     '{{"frames": [{{"n": 1, "shot": "...", "text": "..."}}], "look": "one sentence about the overall visual style"}}'
 )
 
 
-def describe_shots(provider: ai.Provider, sheet: bytes, shots: list[Shot]) -> str:
-    """Подписывает планы по снимку-раскладке. Возвращает общее описание стиля."""
-    data = parse_object(provider.look(sheet, _LOOK_PROMPT.format(n=len(shots))))
-    for item in data.get("frames") or []:
-        if not isinstance(item, dict):
-            continue
-        try:
-            n = int(item.get("n"))
-        except (TypeError, ValueError):
-            continue
-        if 1 <= n <= len(shots):
-            shots[n - 1].shot = " ".join(str(item.get("shot") or "").split())[:400]
-            shots[n - 1].screen_text = " ".join(str(item.get("text") or "").split())[:200]
-    return " ".join(str(data.get("look") or "").split())[:300]
+def describe_shots(provider: ai.Provider, frames: list[Path], shots: list[Shot], per_sheet: int = MAX_SHOTS,
+                   tile: tuple[int, int] = (TILE_W, TILE_H)) -> str:
+    """Подписывает планы по снимкам-раскладкам (по per_sheet кадров на снимок).
+    Возвращает общее описание стиля."""
+    looks = []
+    for offset in range(0, len(frames), per_sheet):
+        chunk = frames[offset:offset + per_sheet]
+        sheet = contact_sheet(chunk, tile, cols=2 if per_sheet <= 4 else 4)
+        data = parse_object(provider.look(sheet, _LOOK_PROMPT.format(n=len(chunk))))
+        for item in data.get("frames") or []:
+            if not isinstance(item, dict):
+                continue
+            try:
+                n = int(item.get("n"))
+            except (TypeError, ValueError):
+                continue
+            if 1 <= n <= len(chunk):
+                shots[offset + n - 1].shot = " ".join(str(item.get("shot") or "").split())[:400]
+                shots[offset + n - 1].screen_text = " ".join(str(item.get("text") or "").split())[:500]
+        looks.append(" ".join(str(data.get("look") or "").split()))
+    return next((x for x in looks if x), "")[:300]
 
 
 # ---------------------------------------------------------------- речь
@@ -289,12 +465,21 @@ _SCRIPT_SYSTEM = (
 _MODE_TOPIC = "The new video is about: {topic}. Keep the reference's structure and rhythm, but the content is about this new topic."
 _MODE_REWRITE = "Keep the reference's topic and message, but say it in your own words - do not copy its sentences."
 _MODE_EXACT = "Keep the narrator's original words (translate them to {lang} if they are in another language); just split them over the scenes."
+_MODE_SLIDES_EXACT = (
+    "Use the on-screen text of each slide as the voice-over of its scene (translate it to {lang} if needed), "
+    "only cleaned up for reading aloud: drop clock times, usernames, UI labels and other screen clutter."
+)
 
 
 def reference_brief(shots: list[Shot], duration: float, transcript: ai.Transcript | None, cps: float,
-                    look: str, caption: str) -> str:
+                    look: str, caption: str, slideshow: bool = False) -> str:
     lines = [f"Reference video: {duration:.1f} s, {len(shots)} scenes."]
-    if transcript and transcript.text:
+    if slideshow:
+        lines.append(
+            "The reference is a photo slideshow (screenshots or pictures, one per scene) over background music. "
+            "Its message is in the on-screen text of the slides; turn it into a narrated video, one voice-over line per slide."
+        )
+    elif transcript and transcript.text:
         lines.append(f"Speech language: {transcript.language or 'unknown'}. Full voice-over: \"{transcript.text[:3000]}\"")
     else:
         lines.append("The reference has no voice-over (music or silence).")
@@ -331,10 +516,11 @@ def parse_object(answer: str) -> dict:
     raise ai.AIError("нейросеть ответила не в том формате — попробуйте ещё раз")
 
 
-def write_script(provider: ai.Provider, brief: str, n: int, lang: str, mode: str, topic: str) -> dict:
+def write_script(provider: ai.Provider, brief: str, n: int, lang: str, mode: str, topic: str,
+                 slideshow: bool = False) -> dict:
     lang_name = LANGUAGES.get(lang, "the same language as the reference voice-over")
     if mode == "exact":
-        mode_text = _MODE_EXACT.format(lang=lang_name)
+        mode_text = (_MODE_SLIDES_EXACT if slideshow else _MODE_EXACT).format(lang=lang_name)
     elif topic.strip():
         mode_text = _MODE_TOPIC.format(topic=topic.strip()[:500])
     else:
@@ -442,8 +628,9 @@ def analyze(item_id: str, provider: ai.Provider, *, topic: str = "", mode: str =
 
     workdir = Path(tempfile.mkdtemp(prefix="analyze-", dir=config.CACHE_DIR))
     try:
+        slideshow = bool(meta.get("slideshow"))
         transcript: ai.Transcript | None = None
-        if info.get("has_audio"):
+        if info.get("has_audio") and not slideshow:  # у слайд-шоу звук — это музыка
             stage("Распознаю речь…", 0.1)
             try:
                 transcript = provider.transcribe(extract_audio(path, workdir, limit), limit)
@@ -453,16 +640,25 @@ def analyze(item_id: str, provider: ai.Provider, *, topic: str = "", mode: str =
             transcript = None  # музыка без слов
 
         stage("Ищу смены кадров…", 0.35)
-        shots = plan_shots(limit, detect_cuts(path, limit))
+        slide = float(meta.get("slide_seconds") or SLIDE_SECONDS)
+        if slideshow and meta.get("slides"):  # границы слайдов известны точно
+            shots = [Shot(i * slide, (i + 1) * slide) for i in range(min(int(meta["slides"]), MAX_SLIDES)) if i * slide < limit]
+            if int(meta.get("slides_total") or 0) > len(shots):
+                warnings.append(f"В посте {meta['slides_total']} слайдов — разобраны первые {len(shots)}.")
+        else:
+            shots = plan_shots(limit, detect_cuts(path, limit))
         if transcript:
             assign_speech(shots, transcript.words)
 
         stage("Смотрю, что в кадрах…", 0.5)
-        frames = grab_frames(path, shots, workdir)
-        sheet = contact_sheet(frames)
+        frames = grab_frames(path, shots, workdir, BIG_TILE if slideshow else (TILE_W, TILE_H))
+        sheet = contact_sheet(frames, cols=5 if len(frames) > 12 else 4)
         look = ""
         try:
-            look = describe_shots(provider, sheet, shots)
+            if slideshow:  # по 4 крупных слайда на снимок — чтобы прочитать текст на скриншотах
+                look = describe_shots(provider, frames, shots, per_sheet=4, tile=BIG_TILE)
+            else:
+                look = describe_shots(provider, frames, shots)
         except ai.AIError as exc:
             warnings.append(f"Не удалось разобрать кадры ({exc}) — описания кадров придуманы по тексту.")
 
@@ -471,13 +667,13 @@ def analyze(item_id: str, provider: ai.Provider, *, topic: str = "", mode: str =
         else:
             lang = language if language in LANGUAGES else "ru"
         cps = speech_pace(transcript.words) if transcript else None
-        if mode == "exact" and not transcript:
-            warnings.append("В образце нет речи — текст написан заново.")
+        if mode == "exact" and not transcript and not (slideshow and any(sh.screen_text for sh in shots)):
+            warnings.append("В образце нет речи — текст написан заново по кадрам и надписям.")
             mode = "adapt"
 
         stage("Пишу сценарий…", 0.7)
-        brief = reference_brief(shots, limit, transcript, cps or ai.CHARS_PER_SECOND, look, str(meta.get("caption") or ""))
-        script = write_script(provider, brief, len(shots), lang, mode, topic)
+        brief = reference_brief(shots, limit, transcript, cps or ai.CHARS_PER_SECOND, look, str(meta.get("caption") or ""), slideshow)
+        script = write_script(provider, brief, len(shots), lang, mode, topic, slideshow)
         scenes = script["scenes"]
         if mode == "exact" and transcript and (not transcript.language or transcript.language == lang):
             scenes = exact_scenes(shots, scenes) or scenes
@@ -503,6 +699,7 @@ def analyze(item_id: str, provider: ai.Provider, *, topic: str = "", mode: str =
                 "language": transcript.language if transcript else "",
                 "transcript": transcript.text if transcript else "",
                 "pace": round(cps, 1) if cps else None,
+                "slideshow": slideshow,
                 "sheet": "data:image/jpeg;base64," + base64.b64encode(sheet).decode("ascii"),
             },
         }

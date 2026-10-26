@@ -490,13 +490,13 @@
       <label class="field">
         <span>Ссылка на ролик</span>
         <input type="text" id="refUrl" inputmode="url" autocomplete="off" placeholder="https://www.tiktok.com/@…/video/…">
-        <small class="hint">TikTok, YouTube Shorts, VK. Instagram часто не отдаёт видео без входа — тогда загрузите файлом.</small>
+        <small class="hint">TikTok (видео и слайды), YouTube Shorts, VK. Instagram часто не отдаёт видео без входа — тогда загрузите файлом.</small>
       </label>
       <div class="ref-file">
         <span class="hint">или</span>
-        <button type="button" class="btn secondary" id="refPick">Загрузить видео</button>
+        <button type="button" class="btn secondary" id="refPick">Загрузить видео или скриншоты</button>
         <span class="hint" id="refFileName"></span>
-        <input type="file" id="refFile" accept="video/*" hidden>
+        <input type="file" id="refFile" accept="video/*,image/*" multiple hidden>
       </div>
       <label class="field">
         <span>О чём ваш ролик <em>(необязательно)</em></span>
@@ -508,7 +508,7 @@
           <span>Текст</span>
           <select id="refMode">
             <option value="adapt">Написать заново</option>
-            <option value="exact">Слова диктора как есть</option>
+            <option value="exact">Как в образце (слова или надписи)</option>
           </select>
         </label>
         <label class="field grow">

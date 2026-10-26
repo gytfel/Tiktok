@@ -284,7 +284,9 @@ def reference_start(payload: dict = Body(...)) -> dict:
     provider = _provider()
     url = str(payload.get("url") or "").strip()
     upload_id = str(payload.get("upload_id") or "").strip()
-    if not url and not upload_id:
+    # Несколько картинок (скриншоты слайдов) — по порядку.
+    image_ids = [str(x) for x in payload.get("upload_ids") or [] if isinstance(x, str)][: reference.MAX_SLIDES]
+    if not url and not upload_id and not image_ids:
         raise HTTPException(400, "Загрузите видео-образец или вставьте ссылку на ролик")
     if url and not reference.is_url(url):
         raise HTTPException(400, "Это не похоже на ссылку — скопируйте её целиком, вместе с https://")
@@ -303,6 +305,9 @@ def reference_start(payload: dict = Body(...)) -> dict:
             if url:
                 task.update(stage="Скачиваю видео…")
                 item_id = reference.download(url, on_progress=lambda f: task.update(progress=round(f * 15)))["id"]
+            elif image_ids:
+                task.update(stage="Собираю слайды…")
+                item_id = reference.slideshow_from_uploads(image_ids)["id"]
 
             def on_stage(text: str, frac: float) -> None:
                 task.update(stage=text, progress=round(15 + frac * 85))
