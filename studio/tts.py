@@ -396,8 +396,6 @@ PIPER_URL = (
     "https://huggingface.co/rhasspy/piper-voices/resolve/main/"
     "{family}/{code}/{name}/{quality}/{code}-{name}-{quality}{ext}?download=true"
 )
-_piper_loaded: dict[str, object] = {}
-_piper_lock = threading.Lock()
 _piper_download_lock = threading.Lock()  # прослушивание и рендер не должны качать модель в один файл
 
 
@@ -471,34 +469,95 @@ def _piper_download(code: str, folder: Path, status) -> None:
             raise TTSError(f"Не удалось скачать голос Piper ({code}) с huggingface.co: {exc}") from exc
 
 
+# Piper работает в отдельном процессе: если библиотека модели (onnxruntime) зависнет или
+# упадёт, студия это переживёт — процесс останавливается по таймауту или кнопке «Отменить».
+_PIPER_SCRIPT = r"""
+import json, sys, wave
+args = json.loads(sys.argv[1])
+from piper import PiperVoice, SynthesisConfig
+voice = PiperVoice.load(args["model"])
+cfg = SynthesisConfig(length_scale=args["length_scale"], volume=args["volume"])
+print("loaded", flush=True)
+wav = None
+for n, chunk in enumerate(voice.synthesize(args["text"], syn_config=cfg), 1):
+    if wav is None:
+        wav = wave.open(args["out"], "wb")
+        wav.setframerate(chunk.sample_rate)
+        wav.setsampwidth(chunk.sample_width)
+        wav.setnchannels(chunk.sample_channels)
+    wav.writeframes(chunk.audio_int16_bytes)
+    print("sentence", n, flush=True)
+if wav is None:
+    sys.exit("в тексте не нашлось ничего, что можно произнести")
+wav.close()
+"""
+PIPER_TIMEOUT = 120.0  # плюс по секунде на символ текста — с запасом даже для слабого сервера
+
+
+def _piper_command(args: dict) -> list[str]:
+    return [sys.executable, "-c", _PIPER_SCRIPT, json.dumps(args, ensure_ascii=False)]
+
+
 def piper_synthesize(text: str, code: str, rate: int, volume: int, out_path: Path, on_status=None) -> TTSResult:
     if not piper_available():
         raise TTSError(f"Голоса Piper недоступны: {piper_problem()}. Выберите голос Microsoft.")
-    from piper import PiperVoice, SynthesisConfig
+    from .ffmpeg_utils import _CREATE_NO_WINDOW
 
+    status = on_status or _no_status
     model = piper_model(code, on_status)
-    (on_status or _no_status)("Озвучиваю голосом Piper…")
-    with _piper_lock:  # загрузка модели — секунды, держим её в памяти
-        voice = _piper_loaded.get(code)
-        if voice is None:
-            try:
-                voice = _piper_loaded[code] = PiperVoice.load(model)
-            except Exception as exc:  # битая или недокачанная модель — скачаем заново в следующий раз
-                model.unlink(missing_ok=True)
-                raise TTSError(f"Не удалось открыть голос Piper ({code}): {exc}") from exc
-    cfg = SynthesisConfig(length_scale=1.0 / max(0.5, 1 + rate / 100), volume=max(0.2, 1 + volume / 100))
-    wav = wave.open(str(out_path), "wb")
+    out_path.unlink(missing_ok=True)
+    args = {
+        "model": str(model),
+        "text": text,
+        "out": str(out_path),
+        "length_scale": 1.0 / max(0.5, 1 + rate / 100),
+        "volume": max(0.2, 1 + volume / 100),
+    }
+    sentences = max(1, len(re.findall(r"[.!?…]+(?=\s|$)", text)))
+    proc = subprocess.Popen(
+        _piper_command(args), stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
+        text=True, encoding="utf-8", errors="replace", creationflags=_CREATE_NO_WINDOW,
+    )
+    lines: list[str] = []
+    errors: list[str] = []
+    readers = [
+        threading.Thread(target=lambda: lines.extend(line.strip() for line in proc.stdout), daemon=True),
+        threading.Thread(target=lambda: errors.extend(line.rstrip() for line in proc.stderr), daemon=True),
+    ]
+    for r in readers:
+        r.start()
+    started = time.monotonic()
+    limit = PIPER_TIMEOUT + len(text)
     try:
-        voice.synthesize_wav(text, wav, syn_config=cfg)
-        wav.close()
-    except Exception as exc:  # ошибка внутри модели (onnxruntime) или нехватка памяти
-        try:
-            wav.close()  # у пустого файла close() падает своей ошибкой — она скрыла бы настоящую
-        except Exception:
-            pass
-        if config.is_disk_full(exc):
-            raise TTSError(config.disk_full_message()) from exc
-        raise TTSError(f"Голос Piper не смог озвучить текст: {type(exc).__name__}: {exc}") from exc
+        while proc.poll() is None:
+            elapsed = time.monotonic() - started
+            done = sum(1 for line in lines if line.startswith("sentence"))
+            if "loaded" not in lines:
+                status(f"Загружаю голос Piper… ({int(elapsed)} с)")
+            else:
+                status(f"Озвучиваю голосом Piper: {min(done, sentences)} из ~{sentences} предложений ({int(elapsed)} с)")
+            if elapsed > limit:
+                raise TTSError(
+                    f"Голос Piper не успел озвучить текст за {int(limit)} с — компьютеру не хватает ресурсов "
+                    "или голос завис. Попробуйте ещё раз или выберите голос Microsoft."
+                )
+            try:
+                proc.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                pass
+    except BaseException:  # таймаут или «Отменить» — останавливаем процесс озвучки
+        proc.kill()
+        proc.wait()
+        raise
+    for r in readers:
+        r.join(timeout=5)
+    if proc.returncode != 0:
+        reason = next((e for e in reversed(errors) if e.strip() and not e.startswith(" ")), f"код {proc.returncode}")
+        if config.is_disk_full(reason):
+            raise TTSError(config.disk_full_message())
+        if "onnx" in reason.lower() or "protobuf" in reason.lower():
+            model.unlink(missing_ok=True)  # битая или недокачанная модель — скачаем заново в следующий раз
+        raise TTSError(f"Голос Piper не смог озвучить текст: {reason[-300:]}")
     if not out_path.exists() or out_path.stat().st_size < 1000:
         raise TTSError("Голос Piper не создал звук")
     return TTSResult(out_path, [])

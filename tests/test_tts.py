@@ -104,32 +104,38 @@ def test_render_rejects_english_voice_for_russian_text_before_tts():
 # ---------------------------------------------------------------- Piper
 
 
-def fake_piper(monkeypatch, calls):
-    """Пакет piper: модель «говорит» по 100 мс тишины на символ."""
+FAKE_PIPER = r"""
+import json, sys, time, wave
+args = json.loads(sys.argv[1])
+mode = args["mode"]
+print("loaded", flush=True)
+if mode == "hang":
+    time.sleep(60)
+if mode == "crash":
+    print("Traceback (most recent call last):", file=sys.stderr)
+    print("  File \"voice.py\", line 1", file=sys.stderr)
+    sys.exit("RuntimeError: onnxruntime: out of memory")
+w = wave.open(args["out"], "wb")
+w.setnchannels(1)
+w.setsampwidth(2)
+w.setframerate(22050)
+w.writeframes(b"\x00\x00" * 2205 * len(args["text"]))
+w.close()
+print("sentence 1", flush=True)
+"""
+
+
+def fake_piper(monkeypatch, calls, mode="ok"):
+    """Процесс Piper подменён скриптом: «говорит» по 100 мс тишины на символ."""
+    import json
     import sys
-    import types
 
-    class SynthesisConfig:
-        def __init__(self, **kw):
-            self.kw = kw
+    def command(args):
+        calls.append(("say", args["text"], args))
+        return [sys.executable, "-c", FAKE_PIPER, json.dumps({**args, "mode": mode})]
 
-    class Voice:
-        def synthesize_wav(self, text, wav, syn_config=None):
-            calls.append(("say", text, syn_config.kw))
-            wav.setnchannels(1)
-            wav.setsampwidth(2)
-            wav.setframerate(22050)
-            wav.writeframes(b"\x00\x00" * 2205 * len(text))
-
-    class PiperVoice:
-        @staticmethod
-        def load(path):
-            calls.append(("load", str(path)))
-            return Voice()
-
-    monkeypatch.setitem(sys.modules, "piper", types.SimpleNamespace(PiperVoice=PiperVoice, SynthesisConfig=SynthesisConfig))
+    monkeypatch.setattr(tts, "_piper_command", command)
     monkeypatch.setattr(tts, "piper_available", lambda: True)
-    monkeypatch.setattr(tts, "_piper_loaded", {})
 
 
 @pytest.fixture
@@ -146,14 +152,14 @@ def piper_cache(tmp_path, monkeypatch):
     return folder
 
 
-def test_piper_voice_is_used_directly_with_rate_and_cached(tmp_path, monkeypatch, piper_cache):
-    calls = []
+def test_piper_voice_is_used_directly_with_rate_and_progress(tmp_path, monkeypatch, piper_cache):
+    calls, statuses = [], []
     fake_piper(monkeypatch, calls)
-    res = tts.synthesize("Привет мир", "piper:ru_RU-irina-medium", 25, 0, 0, tmp_path / "a")
-    tts.synthesize("Ещё раз", "piper:ru_RU-irina-medium", 0, 0, 0, tmp_path / "b")
-    assert res.audio_path.suffix == ".wav" and res.boundaries == [] and res.note == ""
-    assert [c[0] for c in calls] == ["load", "say", "say"]  # модель загружена один раз
-    assert calls[1][2]["length_scale"] == pytest.approx(0.8)  # +25% скорости
+    res = tts.synthesize("Привет мир. Как дела?", "piper:ru_RU-irina-medium", 25, 0, 0, tmp_path / "a", on_status=statuses.append)
+    assert res.audio_path.suffix == ".wav" and res.audio_path.stat().st_size > 1000 and res.note == ""
+    assert calls[0][2]["length_scale"] == pytest.approx(0.8)  # +25% скорости
+    assert calls[0][2]["model"].endswith("ru_RU-irina-medium.onnx")
+    assert any(st.startswith("Озвучиваю голосом Piper") or st.startswith("Загружаю голос Piper") for st in statuses)
 
 
 def test_blocked_edge_falls_back_to_piper_same_gender(tmp_path, monkeypatch, piper_cache):
@@ -165,7 +171,7 @@ def test_blocked_edge_falls_back_to_piper_same_gender(tmp_path, monkeypatch, pip
 
     monkeypatch.setattr(tts, "edge_synthesize", blocked)
     res = tts.synthesize("Привет", "ru-RU-SvetlanaNeural", 0, 0, 0, tmp_path)
-    assert "ru_RU-irina-medium" in calls[0][1] and "Ирина (Piper)" in res.note
+    assert calls[0][2]["model"].endswith("ru_RU-irina-medium.onnx") and "Ирина (Piper)" in res.note
     with pytest.raises(tts.TTSError):  # прослушивание голоса — без подмены
         tts.synthesize("Привет", "ru-RU-SvetlanaNeural", 0, 0, 0, tmp_path, allow_fallback=False)
 
@@ -278,20 +284,34 @@ def test_failed_piper_fallback_shows_both_reasons(tmp_path, monkeypatch):
         tts.synthesize("Привет", "ru-RU-DmitryNeural", 0, 0, 0, tmp_path)
 
 
-def test_piper_model_errors_become_tts_errors(tmp_path, monkeypatch, piper_cache):
-    import sys
-    import types
-
-    class Voice:
-        def synthesize_wav(self, text, wav, syn_config=None):
-            raise RuntimeError("onnxruntime: out of memory")
-
-    monkeypatch.setitem(sys.modules, "piper", types.SimpleNamespace(
-        PiperVoice=types.SimpleNamespace(load=lambda path: Voice()), SynthesisConfig=lambda **kw: kw))
-    monkeypatch.setattr(tts, "piper_available", lambda: True)
-    monkeypatch.setattr(tts, "_piper_loaded", {})
-    with pytest.raises(tts.TTSError, match="RuntimeError: onnxruntime"):
+def test_piper_crash_becomes_tts_error(tmp_path, monkeypatch, piper_cache):
+    fake_piper(monkeypatch, [], mode="crash")
+    with pytest.raises(tts.TTSError, match="RuntimeError: onnxruntime: out of memory"):
         tts.piper_synthesize("Привет", "ru_RU-dmitri-medium", 0, 0, tmp_path / "v.wav")
+
+
+def test_hanging_piper_is_stopped_by_timeout_and_cancel(tmp_path, monkeypatch, piper_cache):
+    import time as _time
+
+    fake_piper(monkeypatch, [], mode="hang")
+    monkeypatch.setattr(tts, "PIPER_TIMEOUT", -4.0)  # предел: -4 с + 6 символов = 2 с
+    started = _time.monotonic()
+    with pytest.raises(tts.TTSError, match="не успел"):
+        tts.piper_synthesize("Привет", "ru_RU-dmitri-medium", 0, 0, tmp_path / "v.wav")
+    assert _time.monotonic() - started < 10  # процесс остановлен, а не дождались 60 с
+
+    class Cancelled(Exception):
+        pass
+
+    def cancel(text):
+        if "Озвучиваю" in text:
+            raise Cancelled()
+
+    monkeypatch.setattr(tts, "PIPER_TIMEOUT", 120.0)
+    started = _time.monotonic()
+    with pytest.raises(Cancelled):
+        tts.piper_synthesize("Привет", "ru_RU-dmitri-medium", 0, 0, tmp_path / "v.wav", on_status=cancel)
+    assert _time.monotonic() - started < 10
 
 
 def picky_stream(refuse):

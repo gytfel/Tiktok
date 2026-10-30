@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import threading
 import time
@@ -49,10 +50,14 @@ class RenderContext:
         self.on_progress(stage, self.lo + (self.hi - self.lo) * value)
 
     def status(self, text: str) -> None:
-        """Показывает, что происходит внутри долгого этапа; заодно здесь срабатывает «Отменить»."""
+        """Показывает, что происходит внутри долгого этапа; заодно здесь срабатывает «Отменить».
+        В журнал попадает только новое (без счётчика секунд, который меняется каждую секунду)."""
         self.check_cancel()
         self.on_status(text)
-        self.log(text)
+        key = re.sub(r"\(\d+ с\)|\d+%|\d+ МБ", "", text)
+        if key != getattr(self, "_last_status", None):
+            self._last_status = key
+            self.log(text)
 
     def check_cancel(self) -> None:
         if self.cancel_event.is_set():
