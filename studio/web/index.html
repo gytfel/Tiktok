@@ -40,6 +40,7 @@
       <div class="card-head">
         <h2>Текст ролика</h2>
         <div class="head-actions">
+          <button class="btn secondary small" id="storyBtn" title="Напишите суть — нейросеть напишет весь ролик">✨ По идее</button>
           <button class="btn secondary small" id="refBtn" title="Разобрать чужой ролик и сделать по нему основу">🎬 По образцу</button>
           <button class="link-btn" id="sampleBtn">Вставить пример</button>
         </div>
@@ -478,6 +479,72 @@
     <div class="dialog-actions">
       <span class="grow"></span>
       <button class="btn secondary" id="phoneClose">Закрыть</button>
+    </div>
+  </div>
+</dialog>
+
+<!-- Сценарий по идее -->
+<dialog id="storyDialog">
+  <div class="dialog-body">
+    <h2>Сценарий по идее</h2>
+    <div id="storyForm">
+      <p class="hint">Напишите главную суть — нейросеть напишет весь ролик: цепляющее начало, текст озвучки по сценам нужной длины, описания кадров, заголовок, подпись к посту и хэштеги. Дальше всё правится как обычно.</p>
+      <label class="field">
+        <span>О чём ролик</span>
+        <textarea id="storyIdea" rows="4" maxlength="1500" placeholder="Например: реклама Telegram-бота, который сохраняет удалённые и изменённые сообщения. Подключается за минуту, ссылка в профиле."></textarea>
+      </label>
+      <div class="row">
+        <label class="field grow">
+          <span>Длительность</span>
+          <select id="storySeconds">
+            <option value="15">15 секунд</option>
+            <option value="30" selected>30 секунд</option>
+            <option value="45">45 секунд</option>
+            <option value="60">60 секунд</option>
+          </select>
+        </label>
+        <label class="field grow">
+          <span>Формат</span>
+          <select id="storyFormat">
+            <option value="auto">Сам подберёт</option>
+            <option value="ad">Реклама / продажа</option>
+            <option value="facts">Факты / познавательный</option>
+            <option value="story">История</option>
+            <option value="howto">Лайфхак / инструкция</option>
+            <option value="motivation">Мотивация</option>
+            <option value="humor">Юмор</option>
+          </select>
+        </label>
+      </div>
+      <div class="row">
+        <label class="field grow">
+          <span>Призыв в конце <em>(необязательно)</em></span>
+          <input type="text" id="storyCta" maxlength="200" placeholder="Например: ссылка на бота в профиле">
+        </label>
+        <label class="field grow">
+          <span>Язык</span>
+          <select id="storyLang">
+            <option value="ru">Русский</option>
+            <option value="en">English</option>
+            <option value="uk">Українська</option>
+            <option value="kk">Қазақша</option>
+          </select>
+        </label>
+      </div>
+      <p class="job-error" id="storyError" hidden></p>
+    </div>
+    <div id="storyProgress" hidden>
+      <p>Нейросеть пишет сценарий… обычно 10–40 секунд.</p>
+      <div class="progress indeterminate"><div></div></div>
+    </div>
+    <div id="storyResult" hidden></div>
+    <div class="dialog-actions">
+      <button type="button" class="btn ghost" id="storyEdit" hidden>Изменить идею</button>
+      <button type="button" class="btn secondary" id="storyAgain" hidden>Ещё вариант</button>
+      <span class="grow"></span>
+      <button type="button" class="btn secondary" id="storyClose">Закрыть</button>
+      <button type="button" class="btn primary" id="storyStart">Написать сценарий</button>
+      <button type="button" class="btn primary" id="storyApply" hidden>Применить к проекту</button>
     </div>
   </div>
 </dialog>

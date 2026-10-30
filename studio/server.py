@@ -19,7 +19,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.requests import ClientDisconnect
 from fastapi.staticfiles import StaticFiles
 
-from . import __version__, ai, config, library, phone, reference, tts
+from . import __version__, ai, config, library, phone, reference, story, tts
 from .tunnel import tunnel
 from .backgrounds import GRADIENT_PRESETS
 from .ffmpeg_utils import capabilities
@@ -340,6 +340,43 @@ def reference_start(payload: dict = Body(...)) -> dict:
         task["finished"] = time.time()
 
     threading.Thread(target=work, daemon=True, name=f"reference-{task['id']}").start()
+    return task
+
+
+@app.post("/api/ai/story")
+def story_start(payload: dict = Body(...)) -> dict:
+    """Сценарий по идее: нейросеть пишет весь ролик. Идёт в фоне, как разбор образца."""
+    provider = _provider()
+    idea = str(payload.get("idea") or "").strip()
+    if not idea:
+        raise HTTPException(400, "Напишите, о чём должен быть ролик")
+    try:
+        seconds = int(payload.get("seconds") or 30)
+        rate = int(payload.get("rate") or 0)
+    except (TypeError, ValueError):
+        seconds, rate = 30, 0
+    options = {
+        "seconds": seconds,
+        "fmt": str(payload.get("format") or "auto"),
+        "language": str(payload.get("language") or "ru"),
+        "cta": str(payload.get("cta") or "")[:200],
+        "rate": rate,
+        "current_voice": str(payload.get("voice") or ""),
+    }
+    task = _new_task()
+
+    def work() -> None:
+        try:
+            task.update(stage="Пишу сценарий…", progress=10)
+            task["result"] = story.write_story(provider, idea, **options)
+            task.update(status="done", progress=100)
+        except Exception as exc:  # показываем пользователю любую причину
+            known = isinstance(exc, (story.StoryError, ai.AIError))
+            task["error"] = str(exc) if known else f"{type(exc).__name__}: {exc}"
+            task["status"] = "error"
+        task["finished"] = time.time()
+
+    threading.Thread(target=work, daemon=True, name=f"story-{task['id']}").start()
     return task
 
 

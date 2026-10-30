@@ -302,6 +302,11 @@ dialog { max-height: calc(100vh - 32px); overflow: auto; }
 .tech .log { margin-top: 6px; }
 .server-note { border: 1px solid var(--line); border-left: 3px solid var(--cyan); border-radius: 9px; padding: 10px 12px; margin: 0 0 12px; font-size: 13px; }
 
+/* По идее */
+.progress.indeterminate div { width: 35%; animation: indeterminate 1.3s ease-in-out infinite; }
+@keyframes indeterminate { from { transform: translateX(-100%); } to { transform: translateX(290%); } }
+.post-caption { background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; font-size: 13.5px; margin: 0 0 8px; white-space: pre-wrap; overflow-wrap: anywhere; }
+
 /* По образцу */
 .ref-file { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: -4px 0 14px; }
 #refFileName { overflow-wrap: anywhere; }

@@ -1162,6 +1162,125 @@ async function setupPhone() {
   } catch (_) { /* не критично */ }
 }
 
+// ------------------------------------------------------------------ по идее
+
+// phase: form → busy → result, как у «По образцу».
+const story = { phase: "form", result: null };
+
+function showStory() {
+  $("#storyForm").hidden = story.phase !== "form";
+  $("#storyProgress").hidden = story.phase !== "busy";
+  $("#storyResult").hidden = story.phase !== "result";
+  $("#storyStart").hidden = story.phase !== "form";
+  $("#storyApply").hidden = story.phase !== "result";
+  $("#storyAgain").hidden = story.phase !== "result";
+  $("#storyEdit").hidden = story.phase !== "result";
+}
+function openStory() {
+  if (story.phase === "form") {
+    const ready = state.status?.settings?.ai_ready;
+    $("#storyError").hidden = ready;
+    if (!ready) $("#storyError").textContent = "Для сценария нужна нейросеть: выберите сервис и вставьте ключ в ⚙ Настройках (подойдёт бесплатный Cloudflare).";
+    if (!$("#storyIdea").value.trim() && state.project.background.ai_context) $("#storyIdea").value = state.project.background.ai_context;
+  }
+  showStory();
+  $("#storyDialog").showModal();
+}
+async function startStory() {
+  const idea = $("#storyIdea").value.trim();
+  if (!idea) {
+    $("#storyError").hidden = false;
+    $("#storyError").textContent = "Напишите, о чём должен быть ролик — хотя бы одно предложение.";
+    return;
+  }
+  $("#storyError").hidden = true;
+  story.phase = "busy";
+  showStory();
+  try {
+    let task = await api("/api/ai/story", {
+      method: "POST",
+      body: {
+        idea,
+        seconds: Number($("#storySeconds").value),
+        format: $("#storyFormat").value,
+        cta: $("#storyCta").value.trim(),
+        language: $("#storyLang").value,
+        rate: state.project.voice.rate,
+        voice: state.project.voice.voice,
+      },
+    });
+    while (task.status === "running") {
+      await new Promise((r) => setTimeout(r, 1500));
+      task = await api(`/api/ai/tasks/${task.id}`);
+    }
+    if (task.status === "error") throw new Error(task.error || "Не удалось написать сценарий");
+    story.result = task.result;
+    story.phase = "result";
+    renderStory();
+    if (!$("#storyDialog").open) toast("Сценарий готов — нажмите «✨ По идее», чтобы посмотреть и применить.", "info", 10000);
+  } catch (e) {
+    story.phase = "form";
+    $("#storyError").hidden = false;
+    $("#storyError").textContent = e.message;
+    if (!$("#storyDialog").open) toast(e.message, "error", 12000);
+  }
+  showStory();
+}
+function postText(r) {
+  return [r.caption, r.hashtags.join(" ")].filter(Boolean).join("\n\n");
+}
+function renderStory() {
+  const r = story.result;
+  const scenes = r.project.background.ai_scenes;
+  const paragraphs = r.project.text.split(/\n\n+/);
+  const firstPrompt = (para) => (scenes.find((sc) => para.includes(sc.text) || sc.text.includes(para)) || {}).prompt || "";
+  const style = state.status?.ai_styles?.[r.project.background.ai_style] || r.project.background.ai_style;
+  $("#storyResult").innerHTML = `
+    <p class="ref-facts">~${Math.round(r.seconds)} сек озвучки · ${paragraphs.length} ${plural(paragraphs.length, "сцена", "сцены", "сцен")} · стиль картинок: ${esc(style)}</p>
+    ${r.project.title?.text ? `<p><b>Заголовок:</b> ${esc(r.project.title.text)}</p>` : ""}
+    <ol class="ref-scenes">${paragraphs.map((t) => `<li>${esc(t)}<span class="hint">${esc(firstPrompt(t))}</span></li>`).join("")}</ol>
+    ${postText(r) ? `<h3 class="sub-head">Для публикации</h3><div class="post-caption">${esc(postText(r))}</div>
+      <button type="button" class="link-btn" id="storyCopy">Скопировать подпись и хэштеги</button>` : ""}
+    <p class="hint">«Применить» заменит текст, заголовок и фон проекта: фон станет «ИИ-картинки» с готовыми описаниями кадров. Не понравилось — «Ещё вариант».</p>`;
+}
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch (_) { // по http (вход с телефона по Wi-Fi) буфер обмена браузер не даёт — копируем по-старому
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand("copy");
+    ta.remove();
+  }
+  toast("Скопировано");
+}
+function applyStory() {
+  if (state.project.text.trim() && !confirm("Заменить текущий текст и кадры новым сценарием?")) return;
+  state.project = mergeDefaults(state.project, story.result.project);
+  syncForm();
+  saveDraft();
+  openTab("bg");
+  $("#storyDialog").close();
+  story.phase = "form";
+  story.result = null;
+  showStory();
+  window.scrollTo({ top: 0, behavior: "smooth" });
+  toast("Сценарий в проекте: проверьте текст и кадры на вкладке «Фон», затем нажмите «Создать видео».", "info", 9000);
+}
+function setupStory() {
+  $("#storyBtn").addEventListener("click", openStory);
+  $("#storyClose").addEventListener("click", () => $("#storyDialog").close());
+  $("#storyStart").addEventListener("click", startStory);
+  $("#storyAgain").addEventListener("click", startStory);
+  $("#storyApply").addEventListener("click", applyStory);
+  $("#storyEdit").addEventListener("click", () => { story.phase = "form"; showStory(); });
+  $("#storyResult").addEventListener("click", (e) => {
+    if (e.target.id === "storyCopy") copyText(postText(story.result));
+  });
+}
+
 // ------------------------------------------------------------------ по образцу
 
 // phase: form → busy → result. Разбор идёт на сервере, окно можно закрыть и открыть снова.
@@ -1353,6 +1472,7 @@ async function init() {
   setupSettings();
   setupPhone();
   setupReference();
+  setupStory();
   bindFields();
 
   $$(".tab").forEach((t) => t.addEventListener("click", () => openTab(t.dataset.tab)));
