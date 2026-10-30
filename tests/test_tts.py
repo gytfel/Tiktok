@@ -245,7 +245,12 @@ def test_failed_piper_fallback_shows_both_reasons(tmp_path, monkeypatch):
     assert "huggingface.co: 403" in str(err.value)
 
     monkeypatch.setattr(tts, "piper_available", lambda: False)
-    with pytest.raises(tts.TTSError, match="не установлены"):
+    monkeypatch.setattr(tts, "piper_problem", lambda: "пакет piper-tts не установлен")
+    monkeypatch.delenv("TIKTOK_STUDIO_SERVER", raising=False)
+    with pytest.raises(tts.TTSError, match="на этом компьютере нет.*VPN"):  # на компьютере — про VPN и start.bat
+        tts.synthesize("Привет", "ru-RU-DmitryNeural", 0, 0, 0, tmp_path)
+    monkeypatch.setenv("TIKTOK_STUDIO_SERVER", "1")
+    with pytest.raises(tts.TTSError, match="на сервере недоступен.*не установлен.*tiktok-studio update"):
         tts.synthesize("Привет", "ru-RU-DmitryNeural", 0, 0, 0, tmp_path)
 
 
@@ -333,3 +338,15 @@ def test_concurrent_piper_downloads_fetch_once(tmp_path, monkeypatch):
         th.join()
     assert len(urls) == 2  # .onnx.json и .onnx — по одному разу
     assert (tmp_path / "cache" / "piper" / "ru_RU-irina-medium.onnx").read_bytes() == b"onnx"
+
+
+
+def test_piper_problem_reports_import_failure(monkeypatch):
+    import importlib.util
+    import sys
+
+    monkeypatch.setattr(tts, "_piper_problem", None)
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: object() if name == "piper" else None)
+    monkeypatch.setitem(sys.modules, "piper", None)  # import piper → ImportError, как при сломанном onnxruntime
+    assert "не загружается" in tts.piper_problem() and not tts.piper_available()
+    monkeypatch.setattr(tts, "_piper_problem", None)

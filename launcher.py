@@ -180,6 +180,33 @@ def install_requirements(venv_dir: Path) -> bool:
     return True
 
 
+# Необязательные пакеты: если не встанут (например, нет сборки под эту версию Python), студия
+# всё равно работает. На Linux Piper уже в requirements.txt.
+OPTIONAL = [] if sys.platform.startswith("linux") else ["piper-tts>=1.3"]
+
+
+def install_optional(venv_dir: Path) -> None:
+    """Голоса Piper — озвучка без Microsoft (выручает, когда Microsoft не отдаёт звук, например через VPN).
+    Ставятся один раз; неудача не мешает запуску."""
+    if not OPTIONAL:
+        return
+    marker = venv_dir / ".tiktok-studio-optional"
+    spec = " ".join(OPTIONAL)
+    if marker.exists() and marker.read_text(encoding="utf-8").strip() == spec:
+        return
+    print("Ставлю запасные голоса Piper (один раз, ~1 минута)...")
+    res = subprocess.run(
+        [str(venv_python(venv_dir)), "-m", "pip", "install", "-q", "--disable-pip-version-check", "--no-cache-dir", *OPTIONAL],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+    )
+    if res.returncode != 0:
+        print("Голоса Piper не установились — студия работает и без них (голоса Microsoft и системные).")
+    try:
+        marker.write_text(spec, encoding="utf-8")  # не пытаемся при каждом запуске
+    except OSError:
+        pass
+
+
 def main() -> int:
     if sys.version_info < (3, 10):
         print(f"Нужен Python 3.10 или новее, а установлен {sys.version.split()[0]}.")
@@ -188,6 +215,7 @@ def main() -> int:
     venv_dir = ensure_venv()
     if venv_dir is None or not install_requirements(venv_dir):
         return 1
+    install_optional(venv_dir)
     try:
         return subprocess.call([str(venv_python(venv_dir)), str(ROOT / "run.py"), *sys.argv[1:]], cwd=ROOT)
     except KeyboardInterrupt:

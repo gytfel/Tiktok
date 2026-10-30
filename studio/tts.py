@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import json
+import os
 import re
 import subprocess
 import sys
@@ -376,8 +377,26 @@ _piper_lock = threading.Lock()
 _piper_download_lock = threading.Lock()  # прослушивание и рендер не должны качать модель в один файл
 
 
+_piper_problem: str | None = None  # проверяется один раз: пакет и его библиотеки не меняются на ходу
+
+
+def piper_problem() -> str:
+    """Пусто, если голосами Piper можно пользоваться, иначе — почему нельзя."""
+    global _piper_problem
+    if _piper_problem is None:
+        if importlib.util.find_spec("piper") is None:
+            _piper_problem = f"пакет piper-tts не установлен (Python: {sys.prefix})"
+        else:
+            try:  # пакет может быть на месте, а его библиотеки (onnxruntime) — не загружаться
+                from piper import PiperVoice, SynthesisConfig  # noqa: F401
+                _piper_problem = ""
+            except Exception as exc:
+                _piper_problem = f"не загружается пакет piper-tts: {type(exc).__name__}: {exc}"
+    return _piper_problem
+
+
 def piper_available() -> bool:
-    return importlib.util.find_spec("piper") is not None
+    return not piper_problem()
 
 
 def piper_list_voices() -> list[dict]:
@@ -424,7 +443,7 @@ def _piper_download(code: str, folder: Path) -> None:
 
 def piper_synthesize(text: str, code: str, rate: int, volume: int, out_path: Path) -> TTSResult:
     if not piper_available():
-        raise TTSError("Голоса Piper не установлены (нужен пакет piper-tts) — выберите голос Microsoft.")
+        raise TTSError(f"Голоса Piper недоступны: {piper_problem()}. Выберите голос Microsoft.")
     from piper import PiperVoice, SynthesisConfig
 
     model = piper_model(code)
@@ -480,8 +499,16 @@ def synthesize(text: str, voice: str, rate: int, pitch: int, volume: int, out_di
         fallback = piper_fallback(voice or DEFAULT_VOICE)
         if fallback is None:
             if piper_available():
-                raise
-            raise TTSError(f"{exc}\n\nЗапасные голоса Piper не установлены. На сервере выполните: sudo tiktok-studio update") from None
+                raise  # для этого языка голосов Piper нет
+            if os.environ.get("TIKTOK_STUDIO_SERVER") == "1":
+                hint = f"Запасной голос Piper на сервере недоступен ({piper_problem()}). Выполните на сервере: sudo tiktok-studio update"
+            else:
+                hint = (
+                    f"Запасных голосов Piper на этом компьютере нет ({piper_problem()}) — они ставятся при запуске start.bat. "
+                    "Если включён VPN, выключите его: адресам VPN Microsoft часто не отдаёт озвучку. "
+                    "Или выберите язык «Системные (без интернета)»."
+                )
+            raise TTSError(f"{exc}\n\n{hint}") from None
         try:
             result = piper_synthesize(text, fallback["id"][len("piper:"):], rate, volume, out_dir / "voice.wav")
         except TTSError as piper_exc:  # показываем обе причины, иначе непонятно, почему не выручил Piper

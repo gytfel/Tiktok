@@ -1,5 +1,6 @@
 """Загрузчик: выбор и восстановление окружения (без реального создания venv)."""
 
+import types
 from pathlib import Path
 
 import launcher
@@ -77,3 +78,19 @@ def test_install_other_errors_mention_internet(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(launcher.subprocess, "run", FakeRun(1, "ERROR: No matching distribution found for fastapi"))
     assert not launcher.install_requirements(tmp_path)
     assert "интернету" in capsys.readouterr().out
+
+
+
+def test_optional_piper_is_tried_once_and_never_blocks(tmp_path, monkeypatch, capsys):
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        return types.SimpleNamespace(returncode=1, stdout="", stderr="no wheel for this Python")
+
+    monkeypatch.setattr(launcher, "OPTIONAL", ["piper-tts>=1.3"])
+    monkeypatch.setattr(launcher.subprocess, "run", fake_run)
+    launcher.install_optional(tmp_path)
+    launcher.install_optional(tmp_path)  # второй запуск — без повторной попытки
+    assert len(calls) == 1 and "piper-tts>=1.3" in calls[0]
+    assert "работает и без них" in capsys.readouterr().out

@@ -80,6 +80,7 @@ def status() -> dict:
         "settings": _public_settings(),
         "ai_styles": {k: v["label"] for k, v in ai.STYLES.items()},
         "server": phone.server_mode(),
+        "piper": tts.piper_problem() or "ok",  # что видит сама служба — для tiktok-studio doctor
         "offline_tts": importlib.util.find_spec("pyttsx3") is not None,
     }
 

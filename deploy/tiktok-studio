@@ -295,6 +295,16 @@ tts.edge_synthesize("Проверка связи.", "ru-RU-DmitryNeural", 0, 0, 
   else
     bad "голос Piper не работает: $(printf '%s' "$piper_err" | grep -v '^\s' | tail -1)"
   fi
+  # То же глазами самой службы: у неё своё окружение (systemd), и оно может отличаться.
+  local key svc_piper
+  key="$(py -c 'from studio import phone; print(phone.access_key())' 2>/dev/null || true)"
+  svc_piper="$(curl -s --max-time 10 -b "studio_key=$key" "http://127.0.0.1:$PORT/api/status" 2>/dev/null \
+    | "$VENV/bin/python" -c 'import json, sys; print(json.load(sys.stdin).get("piper", "?"))' 2>/dev/null || true)"
+  if [ "$svc_piper" = "ok" ]; then
+    ok "служба студии видит голоса Piper"
+  elif [ -n "$svc_piper" ]; then
+    bad "служба студии не видит голоса Piper: $svc_piper → sudo tiktok-studio restart"
+  fi
 
   if [ "$problems" -eq 0 ]; then
     printf '\nВсё в порядке. Если на телефоне ссылка всё равно не открывается — проверьте в панели\nхостинга, что открыты входящие TCP 80 и 443 (эта проверка идёт изнутри сервера).\n\n'
