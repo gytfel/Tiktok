@@ -141,8 +141,10 @@ async def _edge_stream(text: str, voice: str, rate: int, pitch: int, volume: int
         volume=_fmt_rate(volume),
         boundary="WordBoundary",
         proxy=config.get_proxy(),
-        connect_timeout=15,
-        receive_timeout=90,
+        # Ответ Microsoft приходит за секунды; через VPN он может не прийти вовсе —
+        # долгое ожидание каждой попытки превращало озвучку в многоминутное «2%».
+        connect_timeout=10,
+        receive_timeout=25,
     )
     audio = bytearray()
     boundaries: list[Boundary] = []
@@ -160,9 +162,24 @@ def _is_no_audio(exc: BaseException) -> bool:
     return type(exc).__name__ == "NoAudioReceived"
 
 
-def _edge_chunk(text: str, voice: str, rate: int, pitch: int, volume: int, attempts: int) -> tuple[bytes, list[Boundary]]:
+EDGE_BUDGET = 90.0  # секунд на все попытки Microsoft за одну озвучку — дальше выручает Piper
+
+
+def _no_status(text: str) -> None:
+    pass
+
+
+def _edge_chunk(text: str, voice: str, rate: int, pitch: int, volume: int, attempts: int,
+                service: dict | None = None) -> tuple[bytes, list[Boundary]]:
+    service = service if service is not None else {}
+    status = service.get("status", _no_status)
+    deadline = service.get("deadline")
     last_exc: Exception | None = None
     for attempt in range(attempts):
+        if attempt:
+            if deadline is not None and time.monotonic() > deadline:
+                break  # лимит времени на Microsoft исчерпан
+            status(f"Microsoft не отвечает — повтор {attempt + 1} из {attempts}")
         try:
             data, boundaries = asyncio.run(_edge_stream(text, voice, rate, pitch, volume))
             if data:
@@ -172,7 +189,7 @@ def _edge_chunk(text: str, voice: str, rate: int, pitch: int, volume: int, attem
             raise TTSError(f"Неверные параметры озвучки: {exc}") from exc
         except Exception as exc:  # сбои сервиса и сети: пробуем ещё раз с паузой
             last_exc = exc
-        if attempt < attempts - 1:
+        if attempt < attempts - 1 and (deadline is None or time.monotonic() < deadline):
             time.sleep(min(8.0, 1.5 * 2 ** attempt))
     if last_exc is not None and (_is_no_audio(last_exc) or isinstance(last_exc, TTSError)):
         raise TTSError(
@@ -190,8 +207,9 @@ def _edge_chunk(text: str, voice: str, rate: int, pitch: int, volume: int, attem
             blocked=True,
         )
     raise TTSError(
-        "Не удалось связаться с сервисом озвучки Microsoft. Проверьте интернет "
-        f"(или укажите прокси в настройках). Ошибка: {type(last_exc).__name__}: {last_exc}"
+        "Не удалось связаться с сервисом озвучки Microsoft (через VPN так бывает часто). Проверьте интернет "
+        f"или выключите VPN. Ошибка: {type(last_exc).__name__}: {last_exc}",
+        blocked=True,  # без Microsoft выручит голос Piper — ему интернет не нужен
     )
 
 
@@ -224,8 +242,11 @@ def _smaller_parts(text: str) -> list[str]:
     return []
 
 
-def _service_works(voice: str) -> bool:
+def _service_works(voice: str, service: dict) -> bool:
     """Отдаёт ли Microsoft звук вообще — короткой фразой на языке голоса."""
+    if time.monotonic() > service.get("deadline", float("inf")):
+        return False
+    service.get("status", _no_status)("Проверяю, отвечает ли Microsoft…")
     probe = "Проверка связи." if voice.split("-")[0].lower() in CYRILLIC_LANGS else "Hello there."
     try:
         data, _ = asyncio.run(_edge_stream(probe, voice, 0, 0, 0))
@@ -239,21 +260,22 @@ def _edge_piece(text: str, voice: str, rate: int, pitch: int, volume: int, attem
     """Часть текста. Если Microsoft не озвучивает именно её (а не всё подряд), она дробится
     на строки и предложения, а упрямый кусок повторяется без необычных символов."""
     try:
-        return _edge_chunk(text, voice, rate, pitch, volume, attempts)
+        return _edge_chunk(text, voice, rate, pitch, volume, attempts, service)
     except TTSError as exc:
         if not exc.blocked:
             raise
         if "works" not in service:
-            service["works"] = _service_works(voice)
-        if not service["works"]:  # звука нет ни для чего — дробить бессмысленно, выручит Piper
-            raise
+            service["works"] = _service_works(voice, service)
+        if not service["works"] or time.monotonic() > service.get("deadline", float("inf")):
+            raise  # звука нет ни для чего (или время вышло) — дробить бессмысленно, выручит Piper
         parts = _smaller_parts(text)
         if parts:
+            service.get("status", _no_status)("Microsoft не озвучивает фразу — пробую по частям")
             return _join([_edge_piece(p, voice, rate, pitch, volume, 2, service) for p in parts])
         plain = " ".join(_PLAIN_RE.sub(" ", text).split())
         if plain != text and re.search(r"\w", plain):
             try:
-                return _edge_chunk(plain, voice, rate, pitch, volume, 2)
+                return _edge_chunk(plain, voice, rate, pitch, volume, 2, service)
             except TTSError:
                 pass
         raise TTSError(
@@ -263,7 +285,8 @@ def _edge_piece(text: str, voice: str, rate: int, pitch: int, volume: int, attem
         ) from None
 
 
-def edge_synthesize(text: str, voice: str, rate: int, pitch: int, volume: int, out_path: Path, attempts: int = 5) -> TTSResult:
+def edge_synthesize(text: str, voice: str, rate: int, pitch: int, volume: int, out_path: Path, attempts: int = 5,
+                    on_status=None) -> TTSResult:
     """Озвучивает текст по частям: сбой сервиса задевает одну короткую часть, и её
     можно повторить, не переозвучивая всё остальное."""
     problem = voice_language_problem(text, voice)
@@ -272,7 +295,8 @@ def edge_synthesize(text: str, voice: str, rate: int, pitch: int, volume: int, o
     chunks = split_for_tts(text)
     if not chunks:
         raise TTSError("В тексте нет слов для озвучки")
-    service: dict = {}  # проверка «отдаёт ли Microsoft звук вообще» — одна на весь текст
+    # Общее на весь текст: проверка «отдаёт ли Microsoft звук вообще», лимит времени и статус для экрана.
+    service: dict = {"deadline": time.monotonic() + EDGE_BUDGET, "status": on_status or _no_status}
     audio, boundaries = _join([_edge_piece(chunk, voice, rate, pitch, volume, attempts, service) for chunk in chunks])
     out_path.write_bytes(audio)
     return TTSResult(out_path, boundaries)
@@ -403,7 +427,7 @@ def piper_list_voices() -> list[dict]:
     return [dict(v) for v in PIPER_VOICES] if piper_available() else []
 
 
-def piper_model(code: str) -> Path:
+def piper_model(code: str, on_status=None) -> Path:
     """Путь к модели голоса; при первом обращении скачивает её с HuggingFace."""
     if not re.fullmatch(r"[a-z]{2}_[A-Z]{2}-[\w]+-(?:x_low|low|medium|high)", code):
         raise TTSError(f"Неизвестный голос Piper: {code}")
@@ -414,11 +438,11 @@ def piper_model(code: str) -> Path:
     with _piper_download_lock:
         if model.exists() and Path(f"{model}.json").exists():  # пока ждали, скачал другой поток
             return model
-        _piper_download(code, folder)
+        _piper_download(code, folder, on_status or _no_status)
     return model
 
 
-def _piper_download(code: str, folder: Path) -> None:
+def _piper_download(code: str, folder: Path, status) -> None:
     from .net import USER_AGENT, opener
     import urllib.request
 
@@ -431,8 +455,14 @@ def _piper_download(code: str, folder: Path) -> None:
         try:
             req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
             with opener().open(req, timeout=120) as resp, open(part, "wb") as out:
+                total = int(resp.headers.get("Content-Length") or 0) if hasattr(resp, "headers") else 0
+                done = 0
                 while chunk := resp.read(1024 * 1024):
                     out.write(chunk)
+                    done += len(chunk)
+                    if ext == ".onnx":
+                        status(f"Скачиваю голос Piper (один раз): {done * 100 // total}%" if total else
+                               f"Скачиваю голос Piper (один раз): {done // 1048576} МБ")
             part.replace(target)
         except OSError as exc:
             part.unlink(missing_ok=True)
@@ -441,12 +471,13 @@ def _piper_download(code: str, folder: Path) -> None:
             raise TTSError(f"Не удалось скачать голос Piper ({code}) с huggingface.co: {exc}") from exc
 
 
-def piper_synthesize(text: str, code: str, rate: int, volume: int, out_path: Path) -> TTSResult:
+def piper_synthesize(text: str, code: str, rate: int, volume: int, out_path: Path, on_status=None) -> TTSResult:
     if not piper_available():
         raise TTSError(f"Голоса Piper недоступны: {piper_problem()}. Выберите голос Microsoft.")
     from piper import PiperVoice, SynthesisConfig
 
-    model = piper_model(code)
+    model = piper_model(code, on_status)
+    (on_status or _no_status)("Озвучиваю голосом Piper…")
     with _piper_lock:  # загрузка модели — секунды, держим её в памяти
         voice = _piper_loaded.get(code)
         if voice is None:
@@ -485,14 +516,15 @@ def piper_fallback(voice: str) -> dict | None:
 
 
 def synthesize(text: str, voice: str, rate: int, pitch: int, volume: int, out_dir: Path,
-               allow_fallback: bool = True) -> TTSResult:
+               allow_fallback: bool = True, on_status=None) -> TTSResult:
+    """on_status(текст) — что сейчас происходит (повторы, скачивание голоса): для экрана прогресса."""
     out_dir.mkdir(parents=True, exist_ok=True)
     if voice.startswith("system:"):
         return offline_synthesize(text, voice[len("system:"):], rate, out_dir / "voice.wav")
     if voice.startswith("piper:"):
-        return piper_synthesize(text, voice[len("piper:"):], rate, volume, out_dir / "voice.wav")
+        return piper_synthesize(text, voice[len("piper:"):], rate, volume, out_dir / "voice.wav", on_status)
     try:
-        return edge_synthesize(text, voice or DEFAULT_VOICE, rate, pitch, volume, out_dir / "voice.mp3")
+        return edge_synthesize(text, voice or DEFAULT_VOICE, rate, pitch, volume, out_dir / "voice.mp3", on_status=on_status)
     except TTSError as exc:
         if not (exc.blocked and allow_fallback):
             raise
@@ -509,12 +541,14 @@ def synthesize(text: str, voice: str, rate: int, pitch: int, volume: int, out_di
                     "Или выберите язык «Системные (без интернета)»."
                 )
             raise TTSError(f"{exc}\n\n{hint}") from None
+        if on_status:
+            on_status("Microsoft не ответил — озвучиваю голосом Piper")
         try:
-            result = piper_synthesize(text, fallback["id"][len("piper:"):], rate, volume, out_dir / "voice.wav")
+            result = piper_synthesize(text, fallback["id"][len("piper:"):], rate, volume, out_dir / "voice.wav", on_status)
         except TTSError as piper_exc:  # показываем обе причины, иначе непонятно, почему не выручил Piper
             raise TTSError(f"{exc}\n\nЗапасной голос Piper тоже не сработал: {piper_exc}") from None
         result.note = (
-            f"Microsoft не прислал озвучку (с адресами серверов так бывает постоянно), поэтому ролик озвучен "
+            f"Microsoft не прислал озвучку (так бывает через VPN и с адресов серверов), поэтому ролик озвучен "
             f"голосом {fallback['name']}. Чтобы не ждать каждый раз, выберите на вкладке «Голос» язык "
             "«Piper — без Microsoft»."
         )

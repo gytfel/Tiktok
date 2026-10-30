@@ -170,15 +170,39 @@ def test_blocked_edge_falls_back_to_piper_same_gender(tmp_path, monkeypatch, pip
         tts.synthesize("Привет", "ru-RU-SvetlanaNeural", 0, 0, 0, tmp_path, allow_fallback=False)
 
 
-def test_network_errors_do_not_switch_to_piper(tmp_path, monkeypatch, piper_cache):
+def test_no_connection_to_microsoft_switches_to_piper(tmp_path, monkeypatch, piper_cache):
+    # Нет связи с Microsoft (VPN, нет интернета) — Piper работает без сети и выручает.
+    calls = []
+    fake_piper(monkeypatch, calls)
+
+    async def stream(*args):
+        raise OSError("Cannot connect to host speech.platform.bing.com")
+
+    monkeypatch.setattr(tts, "_edge_stream", stream)
+    res = tts.synthesize("Привет", "ru-RU-DmitryNeural", 0, 0, 0, tmp_path)
+    assert res.audio_path.suffix == ".wav" and "Piper" in res.note
+
+
+def test_language_errors_never_switch_to_piper(tmp_path, monkeypatch, piper_cache):
     fake_piper(monkeypatch, [])
+    with pytest.raises(tts.TTSError, match="не умеет читать русский"):
+        tts.synthesize("Привет, мир", "en-US-GuyNeural", 0, 0, 0, tmp_path)
 
-    def offline(*a, **kw):
-        raise tts.TTSError("Не удалось связаться с сервисом")
 
-    monkeypatch.setattr(tts, "edge_synthesize", offline)
-    with pytest.raises(tts.TTSError, match="связаться"):
-        tts.synthesize("Привет", "ru-RU-DmitryNeural", 0, 0, 0, tmp_path)
+def test_microsoft_time_budget_and_status(tmp_path, monkeypatch):
+    stream, calls = picky_stream(lambda t: True)
+    monkeypatch.setattr(tts, "_edge_stream", stream)
+    statuses = []
+    with pytest.raises(tts.TTSError) as err:
+        tts.edge_synthesize("Раз два.", "ru-RU-DmitryNeural", 0, 0, 0, tmp_path / "v.mp3", on_status=statuses.append)
+    assert err.value.blocked and "Microsoft не отвечает — повтор 2 из 5" in statuses
+    assert "Проверяю, отвечает ли Microsoft…" in statuses
+
+    calls.clear()
+    monkeypatch.setattr(tts, "EDGE_BUDGET", 0)  # время на Microsoft вышло — без повторов и проверок, сразу к Piper
+    with pytest.raises(tts.TTSError):
+        tts.edge_synthesize("Раз два.\nТри четыре.", "ru-RU-DmitryNeural", 0, 0, 0, tmp_path / "v.mp3")
+    assert len(calls) == 1  # одна попытка — без повторов, проверки связи и дробления
 
 
 def test_persistent_no_audio_is_marked_blocked(tmp_path, monkeypatch):

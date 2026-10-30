@@ -8,7 +8,7 @@ import pytest
 
 from studio import config, library
 from studio.ffmpeg_utils import capabilities, ffmpeg_exe, probe
-from studio.pipeline import RenderContext, render
+from studio.pipeline import RenderContext, RenderError, render
 from tests.fake_tts import fake_synthesize
 
 pytestmark = pytest.mark.skipif(not capabilities()["ok"], reason="нужен ffmpeg с libass и libx264")
@@ -101,7 +101,7 @@ def test_render_media_with_music(workspace):
 
 
 def test_render_without_word_boundaries(workspace):
-    def no_boundaries(*args):
+    def no_boundaries(*args, **kw):
         return fake_synthesize(*args, with_boundaries=False)
 
     result = render(
@@ -110,3 +110,22 @@ def test_render_without_word_boundaries(workspace):
         synthesize=no_boundaries,
     )
     _check_output(result, 3)
+
+
+
+def test_cancel_and_status_during_voiceover(workspace):
+    import threading
+
+    statuses = []
+    cancel = threading.Event()
+
+    def slow_tts(text, voice, rate, pitch, volume, out_dir, on_status=None, **kw):
+        on_status("Microsoft не отвечает — повтор 2 из 5")
+        cancel.set()  # пользователь нажал «Отменить», пока Microsoft молчит
+        on_status("Microsoft не отвечает — повтор 3 из 5")
+        raise AssertionError("озвучка должна была остановиться")
+
+    ctx = RenderContext(workspace / "job4", on_log=lambda m: None, on_status=statuses.append, cancel_event=cancel)
+    with pytest.raises(RenderError, match="Отменено"):
+        render({"text": TEXT, "export": {"quality": "fast"}}, ctx, synthesize=slow_tts)
+    assert statuses == ["Microsoft не отвечает — повтор 2 из 5"]

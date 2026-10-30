@@ -35,6 +35,7 @@ class RenderContext:
     job_dir: Path
     on_log: Callable[[str], None] = print
     on_progress: Callable[[str, float], None] = lambda stage, value: None
+    on_status: Callable[[str], None] = lambda text: None  # подробности текущего этапа («повтор 2 из 5»)
     cancel_event: threading.Event = field(default_factory=threading.Event)
     # Доля общего прогресса, которую занимает текущая часть работы.
     lo: float = 0.0
@@ -46,6 +47,12 @@ class RenderContext:
     def progress(self, stage: str, value: float) -> None:
         value = max(0.0, min(1.0, value))
         self.on_progress(stage, self.lo + (self.hi - self.lo) * value)
+
+    def status(self, text: str) -> None:
+        """Показывает, что происходит внутри долгого этапа; заодно здесь срабатывает «Отменить»."""
+        self.check_cancel()
+        self.on_status(text)
+        self.log(text)
 
     def check_cancel(self) -> None:
         if self.cancel_event.is_set():
@@ -138,7 +145,7 @@ def render(project: dict, ctx: RenderContext, synthesize: Callable | None = None
     v = p["voice"]
     ctx.progress("Озвучка текста", 0.02)
     ctx.log(f"Голос: {v['voice']}, скорость {v['rate']:+d}%, тон {v['pitch']:+d}Hz")
-    result = synthesize(text, v["voice"], v["rate"], v["pitch"], v["volume"], ctx.job_dir)
+    result = synthesize(text, v["voice"], v["rate"], v["pitch"], v["volume"], ctx.job_dir, on_status=ctx.status)
     ctx.check_cancel()
     note = getattr(result, "note", "")
     if note:

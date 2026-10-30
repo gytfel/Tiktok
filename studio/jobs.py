@@ -20,6 +20,7 @@ class Job:
     project: dict
     status: str = "queued"  # queued | running | done | error | cancelled
     stage: str = "В очереди"
+    detail: str = ""  # что происходит внутри этапа: «Microsoft не отвечает — повтор 2 из 5»
     progress: float = 0.0
     log: list[str] = field(default_factory=list)
     result: dict | None = None
@@ -34,6 +35,7 @@ class Job:
             "id": self.id,
             "status": self.status,
             "stage": self.stage,
+            "detail": self.detail,
             "progress": round(self.progress * 100, 1),
             "result": self.result,
             "error": self.error,
@@ -108,10 +110,16 @@ class JobManager:
             job.log.append(msg)
 
         def on_progress(stage: str, value: float) -> None:
+            if stage != job.stage:
+                job.detail = ""
             job.stage = stage
             job.progress = value
 
-        ctx = RenderContext(job_dir=job_dir, on_log=on_log, on_progress=on_progress, cancel_event=job.cancel_event)
+        def on_status(text: str) -> None:
+            job.detail = text
+
+        ctx = RenderContext(job_dir=job_dir, on_log=on_log, on_progress=on_progress, on_status=on_status,
+                            cancel_event=job.cancel_event)
         try:
             job.result = render(job.project, ctx)
             job.status = "done"

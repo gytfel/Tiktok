@@ -895,8 +895,8 @@ function showJobError(message, stage) {
   el.hidden = false;
   toast(message, "error", 9000);
 }
-function setJobProgress(stage, percent) {
-  $("#jobStage").textContent = stage;
+function setJobProgress(stage, percent, detail = "") {
+  $("#jobStage").textContent = detail ? `${stage}: ${detail}` : stage;
   $("#jobPercent").textContent = `${Math.round(percent)}%`;
   $("#jobBar").style.width = `${percent}%`;
 }
@@ -910,7 +910,7 @@ async function pollJob() {
     state.pollTimer = setTimeout(pollJob, 2000);
     return;
   }
-  setJobProgress(job.stage, job.progress);
+  setJobProgress(job.stage, job.progress, job.status === "running" ? job.detail : "");
   $("#jobLog").textContent = (job.log || []).join("\n");
   if (job.status === "queued" || job.status === "running") {
     state.pollTimer = setTimeout(pollJob, 700);

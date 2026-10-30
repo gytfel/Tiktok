@@ -10,7 +10,7 @@ from studio.timing import Boundary
 from studio.tts import TTSResult
 
 
-def fake_synthesize(text, voice, rate, pitch, volume, out_dir: Path, with_boundaries: bool = True) -> TTSResult:
+def fake_synthesize(text, voice, rate, pitch, volume, out_dir: Path, with_boundaries: bool = True, **kw) -> TTSResult:
     words = re.findall(r"\w[\w\-']*", text)
     per_word = 0.32
     boundaries = []
