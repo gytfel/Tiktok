@@ -76,6 +76,9 @@ class Tunnel:
         self.attempt = 0
         self.method = ""
         self.got_url = False  # Cloudflare выдал ссылку хотя бы в одной попытке
+        # Номер запуска: «Выключить» и новый «Включить» делают прежний поток недействительным,
+        # чтобы он не запустил второй cloudflared, который потом уже не остановить.
+        self._run_id = 0
         self.log: deque[str] = deque(maxlen=200)
 
     # ------------------------------------------------------------ состояние
@@ -108,12 +111,15 @@ class Tunnel:
             self.state, self.url, self.error, self.detail, self.progress = "starting", "", "", "", 0.0
             self.got_url = False
             self.log.clear()
-        threading.Thread(target=self._run, args=(port,), daemon=True, name="tunnel").start()
+            self._run_id += 1
+            run_id = self._run_id
+        threading.Thread(target=self._run, args=(port, run_id), daemon=True, name="tunnel").start()
 
     def stop(self) -> None:
         with self._lock:
             proc, self._proc = self._proc, None
             self.state, self.url, self.error, self.detail = "off", "", "", ""
+            self._run_id += 1
         if proc and proc.poll() is None:
             proc.terminate()
             try:
@@ -121,23 +127,23 @@ class Tunnel:
             except subprocess.TimeoutExpired:
                 proc.kill()
 
-    def _run(self, port: int) -> None:
+    def _run(self, port: int, run_id: int = 0) -> None:
         try:
             exe = self._ensure_binary()
         except Exception as exc:  # сеть, диск, распаковка
-            self._fail(f"Не удалось скачать cloudflared: {exc}")
+            self._fail(f"Не удалось скачать cloudflared: {exc}", run_id=run_id)
             return
         for n, (method, extra) in enumerate(ATTEMPTS, 1):
             with self._lock:
-                if self.state == "off":  # выключили, пока скачивали или подключались
+                if self._run_id != run_id:  # выключили (или запустили заново), пока скачивали или подключались
                     return
                 self.state, self.url, self.attempt, self.method = "starting", "", n, method
             self.log.append(f"--- способ {n} из {len(ATTEMPTS)}: {method}")
-            outcome = self._launch(exe, port, extra)
+            outcome = self._launch(exe, port, extra, run_id)
             if outcome in ("stopped", "error"):
                 return
             if outcome == "died":
-                self._fail("Туннель оборвался. Проверьте интернет и включите доступ ещё раз.", self.log_tail())
+                self._fail("Туннель оборвался. Проверьте интернет и включите доступ ещё раз.", self.log_tail(), run_id)
                 return
         if self.got_url:
             reason = (
@@ -146,9 +152,9 @@ class Tunnel:
             )
         else:
             reason = "Не удалось получить ссылку от Cloudflare: сервис trycloudflare.com не ответил. "
-        self._fail(reason + BLOCKED_HINT, self.log_tail())
+        self._fail(reason + BLOCKED_HINT, self.log_tail(), run_id)
 
-    def _launch(self, exe: Path, port: int, extra: list[str]) -> str:
+    def _launch(self, exe: Path, port: int, extra: list[str], run_id: int = 0) -> str:
         """Запускает cloudflared. Возвращает stopped (выключили кнопкой), failed (не подключился —
         можно пробовать следующий способ), died (работал и оборвался) или error."""
         try:
@@ -162,10 +168,10 @@ class Tunnel:
                 errors="replace",
             )
         except OSError as exc:
-            self._fail(f"Не удалось запустить cloudflared: {exc}")
+            self._fail(f"Не удалось запустить cloudflared: {exc}", run_id=run_id)
             return "error"
         with self._lock:
-            if self.state == "off":  # выключили, пока процесс запускался
+            if self._run_id != run_id:  # выключили, пока процесс запускался
                 proc.terminate()
                 return "stopped"
             self._proc = proc
@@ -199,8 +205,10 @@ class Tunnel:
             self._proc = None
         return "died" if connected else "failed"
 
-    def _fail(self, message: str, detail: str = "") -> None:
+    def _fail(self, message: str, detail: str = "", run_id: int | None = None) -> None:
         with self._lock:
+            if run_id is not None and run_id != self._run_id:
+                return  # этот запуск уже отменён — его ошибка никому не нужна
             self._proc = None
             self.state, self.error, self.detail, self.url = "error", message, detail, ""
 
@@ -215,7 +223,7 @@ class Tunnel:
             self.state = "downloading"
         target.parent.mkdir(parents=True, exist_ok=True)
         asset = _asset_name()
-        tmp = target.parent / (asset + ".part")
+        tmp = target.parent / f"{asset}.{os.getpid()}.{threading.get_ident()}.part"  # у каждого потока свой
         import urllib.request
 
         req = urllib.request.Request(DOWNLOAD_BASE + asset, headers={"User-Agent": USER_AGENT})

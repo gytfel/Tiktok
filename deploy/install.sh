@@ -47,7 +47,9 @@ EOF
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --domain) DOMAIN="${2:-}"; shift 2 ;;
+    --domain)
+      [ -n "${2:-}" ] || die "после --domain укажите домен, например: --domain studio.example.ru"
+      DOMAIN="$2"; shift 2 ;;
     --domain=*) DOMAIN="${1#--domain=}"; shift ;;
     --free-ports) FREE_PORTS=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -280,6 +282,16 @@ Environment=HOME=$DATA_DIR
 Environment=PYTHONUNBUFFERED=1
 ${FFMPEG_BIN:+Environment=TIKTOK_STUDIO_FFMPEG=$FFMPEG_BIN
 }UMask=0077
+# Студии нужна только её папка с данными: остальную систему она видит только для чтения.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
 ExecStart=$VENV/bin/python run.py --server --host 127.0.0.1 --port $PORT
 Restart=always
 RestartSec=3

@@ -263,7 +263,10 @@ class CloudflareProvider(Provider):
         try:
             _, body = self._run(model, payload, timeout=180)
         except AIError as exc:
-            if "response_format" not in payload or "лимит" in str(exc):
+            # Повторяем без JSON-режима, только если модель отвергла сам запрос (400/422):
+            # таймаут, неверный ключ или лимит повтор не исправит, а время ожидания удвоит.
+            rejected = getattr(exc.__cause__, "status", None) in (400, 422) or "json" in str(exc).lower()
+            if "response_format" not in payload or not rejected:
                 raise
             # Если модель не поддерживает JSON-режим, пробуем ещё раз без него.
             payload = {k: v for k, v in payload.items() if k != "response_format"}

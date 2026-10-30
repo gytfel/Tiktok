@@ -307,3 +307,29 @@ def test_unpronounceable_phrase_names_it_after_trying_parts(tmp_path, monkeypatc
     with pytest.raises(tts.TTSError, match="даже по частям") as err:
         tts.edge_synthesize("Это ужас, правда.", "ru-RU-DmitryNeural", 0, 0, 0, tmp_path / "v.mp3", attempts=1)
     assert err.value.blocked and "Это ужас," in calls  # пробовали и по запятым
+
+
+def test_concurrent_piper_downloads_fetch_once(tmp_path, monkeypatch):
+    import io
+    import threading
+    import time as _time
+
+    from studio import config, net
+
+    monkeypatch.setattr(config, "CACHE_DIR", tmp_path / "cache")
+    urls = []
+
+    class Opener:
+        def open(self, req, timeout=0):
+            urls.append(req.full_url)
+            _time.sleep(0.05)
+            return io.BytesIO(b"{}" if ".onnx.json" in req.full_url else b"onnx")
+
+    monkeypatch.setattr(net, "opener", lambda: Opener())
+    threads = [threading.Thread(target=tts.piper_model, args=("ru_RU-irina-medium",)) for _ in range(3)]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join()
+    assert len(urls) == 2  # .onnx.json и .onnx — по одному разу
+    assert (tmp_path / "cache" / "piper" / "ru_RU-irina-medium.onnx").read_bytes() == b"onnx"

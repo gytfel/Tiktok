@@ -15,7 +15,7 @@ import secrets
 import socket
 import time
 from collections import deque
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
@@ -29,13 +29,19 @@ COOKIE = "studio_key"
 ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # без похожих 0/O и 1/I
 KEY_LENGTH = 8
 FAIL_DELAY = 1.0  # пауза после неверного кода — против подбора
-FAIL_LIMIT = 30  # неверных кодов за FAIL_WINDOW секунд — и вход временно закрывается
+FAIL_LIMIT = 20  # неверных кодов с одного адреса за FAIL_WINDOW секунд — и вход с него закрывается
+FAIL_LIMIT_TOTAL = 500  # со всех адресов вместе — против подбора с множества адресов
 FAIL_WINDOW = 600
 # Заголовки, которые добавляет туннель Cloudflare: такой запрос пришёл из интернета,
 # хотя сокет у него локальный (127.0.0.1).
 PROXY_HEADERS = (b"cf-connecting-ip", b"cf-ray", b"x-forwarded-for")
-# Время неверных попыток входа (общее для всех клиентов).
-failures: deque[float] = deque()
+# Имена, по которым студию открывают на этом компьютере. Другое имя при запросе с 127.0.0.1 —
+# признак атаки DNS rebinding: чужой сайт перенаправил свой домен на этот компьютер.
+LOCAL_HOSTS = {"localhost", "127.0.0.1", "[::1]"}
+UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+# Время неверных попыток входа по адресам клиентов.
+failures: dict[str, deque[float]] = {}
+_key_cache: tuple | None = None  # (файл, время изменения, размер, код) — чтобы не читать файл на каждый запрос
 
 
 def enabled() -> bool:
@@ -53,11 +59,25 @@ def port() -> int:
         return 8765
 
 
+def _settings_stamp() -> tuple | None:
+    try:
+        st = config.SETTINGS_FILE.stat()
+    except OSError:
+        return None
+    return (str(config.SETTINGS_FILE), st.st_mtime_ns, st.st_size)
+
+
 def access_key() -> str:
+    global _key_cache
+    stamp = _settings_stamp()
+    if stamp and _key_cache and _key_cache[:3] == stamp:
+        return _key_cache[3]
     key = config.load_settings().get("phone_key") or ""
     if len(key) != KEY_LENGTH or any(c not in ALPHABET for c in key):
         key = "".join(secrets.choice(ALPHABET) for _ in range(KEY_LENGTH))
         config.save_settings({"phone_key": key})
+        stamp = _settings_stamp()
+    _key_cache = (*stamp, key) if stamp else None
     return key
 
 
@@ -108,6 +128,51 @@ def lan_addresses() -> list[str]:
 
 def is_proxied(scope) -> bool:
     return any(name in PROXY_HEADERS for name, _ in scope.get("headers") or [])
+
+
+def _header(scope, name: bytes) -> str:
+    for key, value in scope.get("headers") or []:
+        if key == name:
+            return value.decode("latin-1")
+    return ""
+
+
+def host_is_local(scope) -> bool:
+    host = _header(scope, b"host").strip().lower()
+    hostname = host.split("]")[0] + "]" if host.startswith("[") else host.rsplit(":", 1)[0]
+    return hostname in LOCAL_HOSTS
+
+
+def is_cross_site(scope) -> bool:
+    """Запрос, меняющий данные, отправила чужая страница (форма или скрипт другого сайта)."""
+    if scope.get("method") not in UNSAFE_METHODS:
+        return False
+    if _header(scope, b"sec-fetch-site") == "cross-site":
+        return True
+    origin = _header(scope, b"origin")
+    if not origin:
+        return False
+    return origin == "null" or urlparse(origin).netloc.lower() != _header(scope, b"host").strip().lower()
+
+
+def client_id(scope, proxied: bool) -> str:
+    """Адрес клиента: за туннелем и Caddy — из их заголовков (последний адрес добавил наш прокси)."""
+    if proxied:
+        forwarded = _header(scope, b"cf-connecting-ip") or _header(scope, b"x-forwarded-for").split(",")[-1]
+        if forwarded.strip():
+            return forwarded.strip()
+    return (scope.get("client") or ("",))[0]
+
+
+def _too_many_failures(who: str, now: float) -> bool:
+    for addr in list(failures):
+        attempts = failures[addr]
+        while attempts and now - attempts[0] > FAIL_WINDOW:
+            attempts.popleft()
+        if not attempts:
+            del failures[addr]
+    total = sum(len(a) for a in failures.values())
+    return len(failures.get(who, ())) >= FAIL_LIMIT or total >= FAIL_LIMIT_TOTAL
 
 
 def phone_urls() -> list[str]:
@@ -163,6 +228,13 @@ class PhoneGuard:
         proxied = is_proxied(scope)
         server = server_mode()
         if is_local(client[0]) and not proxied and not server:
+            # Свой компьютер пускаем без кода — но только по своему имени и не по команде чужого сайта.
+            if not host_is_local(scope):
+                response = PlainTextResponse(f"Откройте студию по адресу http://127.0.0.1:{port()}", status_code=403)
+                return await response(scope, receive, send)
+            if is_cross_site(scope):
+                response = PlainTextResponse("Запрос с чужого сайта отклонён.", status_code=403)
+                return await response(scope, receive, send)
             return await self.app(scope, receive, send)
         if not server and ((proxied and not tunnel.active()) or (not proxied and not enabled())):
             response = PlainTextResponse(
@@ -177,9 +249,8 @@ class PhoneGuard:
         if key_matches(request.cookies.get(COOKIE, ""), key):
             return await self.app(scope, receive, send)
         now = time.monotonic()
-        while failures and now - failures[0] > FAIL_WINDOW:
-            failures.popleft()
-        if from_query and len(failures) >= FAIL_LIMIT:
+        who = client_id(scope, proxied)
+        if from_query and _too_many_failures(who, now):
             response = PlainTextResponse("Слишком много неверных кодов. Подождите 10 минут.", status_code=429)
             return await response(scope, receive, send)
         if key_matches(from_query, key):
@@ -188,7 +259,7 @@ class PhoneGuard:
             response.set_cookie(COOKIE, key, max_age=365 * 24 * 3600, httponly=True, samesite="lax", secure=proxied)
             return await response(scope, receive, send)
         if from_query:
-            failures.append(now)
+            failures.setdefault(who, deque()).append(now)
             await asyncio.sleep(FAIL_DELAY)
         if (scope.get("path") or "").startswith("/api/"):
             hint = "sudo tiktok-studio info на сервере" if server else "QR-код в студии на компьютере"

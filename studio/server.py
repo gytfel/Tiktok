@@ -8,6 +8,7 @@ import mimetypes
 import os
 import tempfile
 import threading
+import time
 import uuid
 from pathlib import Path
 
@@ -117,7 +118,8 @@ def get_settings() -> dict:
 
 @app.post("/api/settings")
 def update_settings(values: dict = Body(...)) -> dict:
-    config.save_settings(values)
+    # Код доступа через веб не меняется: иначе любой, кто вошёл, мог бы выгнать остальных.
+    config.save_settings({k: v for k, v in values.items() if k != "phone_key"})
     return _public_settings()
 
 
@@ -251,6 +253,17 @@ def ai_image(payload: dict = Body(...)) -> dict:
 # ИИ-видео делается минутами: запрос сразу возвращает номер задачи, а страница
 # спрашивает о результате. Иначе через туннель (лимит ответа ~100 с) он бы обрывался.
 _ai_tasks: dict[str, dict] = {}
+TASK_TTL = 3600  # готовые задачи хранятся час, потом забываются — чтобы память сервера не росла
+
+
+def _new_task() -> dict:
+    now = time.time()
+    for tid, old in list(_ai_tasks.items()):
+        if old["status"] != "running" and now - old.get("finished", now) > TASK_TTL:
+            del _ai_tasks[tid]
+    task_id = uuid.uuid4().hex[:12]
+    task = _ai_tasks[task_id] = {"id": task_id, "status": "running", "stage": "", "progress": 0, "result": None, "error": None}
+    return task
 
 
 @app.post("/api/ai/video")
@@ -264,8 +277,7 @@ def ai_video(payload: dict = Body(...)) -> dict:
     except (TypeError, ValueError):
         seconds = 4.0
     prompt = str(payload.get("prompt") or "")[:1500]
-    task_id = uuid.uuid4().hex[:12]
-    task = _ai_tasks[task_id] = {"id": task_id, "status": "running", "stage": "", "result": None, "error": None}
+    task = _new_task()
 
     def work() -> None:
         try:
@@ -274,8 +286,9 @@ def ai_video(payload: dict = Body(...)) -> dict:
         except Exception as exc:  # показываем пользователю любую причину
             task["error"] = str(exc) if isinstance(exc, ai.AIError) else f"{type(exc).__name__}: {exc}"
             task["status"] = "error"
+        task["finished"] = time.time()
 
-    threading.Thread(target=work, daemon=True, name=f"ai-video-{task_id}").start()
+    threading.Thread(target=work, daemon=True, name=f"ai-video-{task['id']}").start()
     return task
 
 
@@ -298,8 +311,7 @@ def reference_start(payload: dict = Body(...)) -> dict:
         "language": str(payload.get("language") or "ru"),
         "current_voice": str(payload.get("voice") or ""),
     }
-    task_id = uuid.uuid4().hex[:12]
-    task = _ai_tasks[task_id] = {"id": task_id, "status": "running", "stage": "", "progress": 0, "result": None, "error": None}
+    task = _new_task()
 
     def work() -> None:
         try:
@@ -324,8 +336,9 @@ def reference_start(payload: dict = Body(...)) -> dict:
             else:
                 task["error"] = f"{type(exc).__name__}: {exc}"
             task["status"] = "error"
+        task["finished"] = time.time()
 
-    threading.Thread(target=work, daemon=True, name=f"reference-{task_id}").start()
+    threading.Thread(target=work, daemon=True, name=f"reference-{task['id']}").start()
     return task
 
 
@@ -367,14 +380,31 @@ async def upload_raw(request: Request, name: str) -> dict:
         item_id, path = library.start_upload(name)
     except library.LibraryError as exc:
         raise HTTPException(400, str(exc)) from exc
+    out = None
     try:
-        with open(path, "wb") as out:
-            async for chunk in request.stream():
-                out.write(chunk)
+        # Запись на диск — в отдельном потоке и крупными кусками: иначе большой файл
+        # останавливал бы на время загрузки все остальные запросы студии.
+        out = await run_in_threadpool(open, path, "wb")
+        buf = bytearray()
+        async for chunk in request.stream():
+            buf += chunk
+            if len(buf) >= 4 * 1024 * 1024:
+                await run_in_threadpool(out.write, bytes(buf))
+                buf.clear()
+        if buf:
+            await run_in_threadpool(out.write, bytes(buf))
+        await run_in_threadpool(out.close)
     except ClientDisconnect:
+        if out:
+            out.close()
         path.unlink(missing_ok=True)
         raise HTTPException(400, "Загрузка прервалась — попробуйте ещё раз")
     except OSError as exc:
+        if out:
+            try:
+                out.close()
+            except OSError:
+                pass
         path.unlink(missing_ok=True)
         if config.is_disk_full(exc):
             raise HTTPException(507, config.disk_full_message()) from exc

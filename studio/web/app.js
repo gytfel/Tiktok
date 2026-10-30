@@ -183,7 +183,7 @@ function updateOutputs() {
 }
 function updateVoiceWarning() {
   // Та же проверка, что на сервере: английский и т.п. голос не прочитает русский текст.
-  const voice = state.project.voice.voice || "";
+  const voice = (state.project.voice.voice || "").replace(/^piper:/, "").replace(/_/g, "-");
   const letters = (state.project.text || "").match(/\p{L}/gu) || [];
   const cyr = letters.filter((c) => /[\u0400-\u04FF]/.test(c)).length;
   const lang = voice.split("-")[0].toLowerCase();

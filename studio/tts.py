@@ -373,6 +373,7 @@ PIPER_URL = (
 )
 _piper_loaded: dict[str, object] = {}
 _piper_lock = threading.Lock()
+_piper_download_lock = threading.Lock()  # прослушивание и рендер не должны качать модель в один файл
 
 
 def piper_available() -> bool:
@@ -391,6 +392,14 @@ def piper_model(code: str) -> Path:
     model = folder / f"{code}.onnx"
     if model.exists() and Path(f"{model}.json").exists():
         return model
+    with _piper_download_lock:
+        if model.exists() and Path(f"{model}.json").exists():  # пока ждали, скачал другой поток
+            return model
+        _piper_download(code, folder)
+    return model
+
+
+def _piper_download(code: str, folder: Path) -> None:
     from .net import USER_AGENT, opener
     import urllib.request
 
@@ -411,7 +420,6 @@ def piper_model(code: str) -> Path:
             if config.is_disk_full(exc):
                 raise TTSError(config.disk_full_message()) from exc
             raise TTSError(f"Не удалось скачать голос Piper ({code}) с huggingface.co: {exc}") from exc
-    return model
 
 
 def piper_synthesize(text: str, code: str, rate: int, volume: int, out_path: Path) -> TTSResult:

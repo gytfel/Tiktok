@@ -201,7 +201,7 @@ def app(workspace, monkeypatch):
 
 
 def local_client(app):
-    return testclient.TestClient(app, client=("127.0.0.1", 50000), follow_redirects=False)
+    return testclient.TestClient(app, base_url="http://127.0.0.1:8765", client=("127.0.0.1", 50000), follow_redirects=False)
 
 
 CF = {"cf-connecting-ip": "203.0.113.7", "cf-ray": "abc", "x-forwarded-proto": "https"}
@@ -269,3 +269,34 @@ def test_ai_video_runs_as_background_task(app, monkeypatch):
             break
         time.sleep(0.05)
     assert task["status"] == "done" and task["result"]["id"] == "abc123def456"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="имитация cloudflared — shell-скрипт")
+def test_stop_and_start_during_download_launch_only_one_cloudflared(workspace, monkeypatch):
+    import threading
+
+    install_fake(FAKE_OK)
+    gate = threading.Event()
+    real = tunnel_mod.Tunnel._ensure_binary
+    calls = []
+
+    def slow_binary(self):
+        calls.append(1)
+        if len(calls) == 1:
+            gate.wait(5)  # первый запуск «качает» cloudflared, пока его выключают и включают снова
+        return real(self)
+
+    monkeypatch.setattr(tunnel_mod.Tunnel, "_ensure_binary", slow_binary)
+    launched = []
+    real_popen = tunnel_mod.subprocess.Popen
+    monkeypatch.setattr(tunnel_mod.subprocess, "Popen", lambda *a, **kw: launched.append(1) or real_popen(*a, **kw))
+    t = tunnel_mod.Tunnel()
+    t.start(8765)
+    time.sleep(0.1)
+    t.stop()
+    t.start(8765)
+    wait_for(t, {"running"})
+    gate.set()
+    time.sleep(0.5)  # прежний поток доделал «скачивание» и должен просто выйти
+    assert len(launched) == 1 and t.state == "running"
+    t.stop()

@@ -71,6 +71,26 @@ def is_url(text: str) -> bool:
     return bool(re.match(r"^https?://\S+$", text.strip()))
 
 
+def check_public_url(url: str) -> None:
+    """Ссылка на образец не должна вести во внутреннюю сеть (127.0.0.1, 192.168.…, адреса облака):
+    иначе через студию можно было бы читать служебные адреса сервера."""
+    import ipaddress
+    import socket
+    from urllib.parse import urlparse
+
+    host = (urlparse(url.strip()).hostname or "").strip("[]")
+    if not host:
+        raise ReferenceError("Это не похоже на ссылку — скопируйте её целиком, вместе с https://")
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except OSError:
+        return  # имя не нашлось — дальше это скажет загрузчик
+    for info in infos:
+        addr = ipaddress.ip_address(info[4][0].split("%")[0])
+        if addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_reserved or addr.is_multicast or addr.is_unspecified:
+            raise ReferenceError("Ссылка ведёт во внутреннюю сеть — нужна ссылка на ролик в интернете.")
+
+
 def download(url: str, on_progress: Callable[[float], None] | None = None) -> dict:
     """Скачивает видео по ссылке (TikTok, Reels, Shorts, VK…) в библиотеку загрузок."""
     try:
@@ -80,6 +100,7 @@ def download(url: str, on_progress: Callable[[float], None] | None = None) -> di
             "Для видео по ссылке нужен пакет yt-dlp. Обновите студию "
             "(на сервере: sudo tiktok-studio update) или загрузите видео файлом."
         ) from exc
+    check_public_url(url)
     config.ensure_dirs()
     tmp = Path(tempfile.mkdtemp(prefix="ref-", dir=config.CACHE_DIR))
 
@@ -576,7 +597,8 @@ def build_project(scenes: list[dict], hook: str, style: str, topic: str) -> dict
     ai_scenes = []
     for sc in ai.split_scenes(text):
         prompt = prompts[sc.paragraph] if sc.paragraph < len(prompts) else ""
-        ai_scenes.append({"text": sc.text, "prompt": prompt or sc.text, "image": None, "video": None, "use_video": False})
+        ai_scenes.append({"text": sc.text, "prompt": prompt or sc.text, "image": None, "video": None, "use_video": False,
+                          "seconds": round(sc.seconds, 1)})
     patch: dict = {
         "text": text,
         "background": {

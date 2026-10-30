@@ -317,7 +317,7 @@ def client():
     from studio.server import app
 
     phone.failures.clear()
-    return testclient.TestClient(app, client=("127.0.0.1", 50000))
+    return testclient.TestClient(app, base_url="http://127.0.0.1:8765", client=("127.0.0.1", 50000))
 
 
 def test_reference_api_requires_provider_and_source(client, monkeypatch):
@@ -484,3 +484,10 @@ def test_analyze_slideshow_reads_slides_in_big_sheets(tmp_path):
     assert [(s["start"], s["end"]) for s in shots][:2] == [(0.0, 3.0), (3.0, 6.0)]
     assert res["reference"]["slideshow"] and not res["warnings"]
     assert "on-screen text of each slide" in provider.system and "photo slideshow" in provider.brief
+
+
+def test_links_into_internal_network_are_refused(monkeypatch):
+    fake_ytdlp(monkeypatch, error="не должен вызываться")
+    for url in ("http://127.0.0.1:2019/config/", "http://localhost:8765/api/settings", "http://169.254.169.254/latest/meta-data/", "http://[::1]/"):
+        with pytest.raises(reference.ReferenceError, match="внутреннюю сеть"):
+            reference.download(url)

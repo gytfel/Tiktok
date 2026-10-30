@@ -266,3 +266,28 @@ def test_render_with_ai_images(workspace, monkeypatch):
     project["background"]["ai_scenes"] = scenes
     render(project, RenderContext(workspace / "job2", on_log=lambda m: None), synthesize=fake_synthesize)
     assert len(provider.images) == 3
+
+
+
+def test_cloudflare_json_mode_retry_only_when_request_rejected(monkeypatch):
+    calls = []
+
+    def fake_request(url, **kw):
+        calls.append("response_format" in kw["json_body"])
+        raise ai.NetError("timed out")
+
+    monkeypatch.setattr(ai, "request", fake_request)
+    with pytest.raises(ai.AIError):
+        ai.CloudflareProvider("acc", "tok").chat("sys", "user")
+    assert calls == [True]  # таймаут не повторяем — иначе ожидание удваивается
+
+    calls.clear()
+
+    def rejects_json_mode(url, **kw):
+        calls.append("response_format" in kw["json_body"])
+        if "response_format" in kw["json_body"]:
+            raise ai.NetError("unknown field", 400)
+        return 200, "application/json", b'{"result": {"response": "ok"}}'
+
+    monkeypatch.setattr(ai, "request", rejects_json_mode)
+    assert ai.CloudflareProvider("acc", "tok").chat("sys", "user") == "ok" and calls == [True, False]

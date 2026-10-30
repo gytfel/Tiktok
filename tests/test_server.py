@@ -18,7 +18,7 @@ def client(tmp_path, monkeypatch):
     config.ensure_dirs()
     from studio.server import app
 
-    return testclient.TestClient(app, client=("127.0.0.1", 50000))  # запросы «с этого компьютера»
+    return testclient.TestClient(app, base_url="http://127.0.0.1:8765", client=("127.0.0.1", 50000))  # запросы «с этого компьютера»
 
 
 @pytest.mark.skipif(not capabilities()["found"], reason="нужен ffmpeg")
@@ -70,3 +70,14 @@ def test_disk_full_detection():
     assert config.is_disk_full("[WinError 112] There is not enough space on the disk")
     assert not config.is_disk_full(OSError(errno.EACCES, "Permission denied"))
     assert "закончилось место" in config.disk_full_message()
+
+
+def test_finished_ai_tasks_are_forgotten_after_ttl(client, monkeypatch):
+    from studio import server
+
+    server._ai_tasks.clear()
+    old = server._new_task()
+    old.update(status="done", finished=server.time.time() - server.TASK_TTL - 1)
+    running = server._new_task()
+    fresh = server._new_task()
+    assert old["id"] not in server._ai_tasks and running["id"] in server._ai_tasks and fresh["id"] in server._ai_tasks
